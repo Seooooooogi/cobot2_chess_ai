@@ -26,8 +26,8 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 CLASS_NAMES = ["Pawn", "Rook", "Knight", "Bishop", "Queen", "King"]
 CLASS_ABBR = {"Pawn": "P", "Rook": "R", "Knight": "N", "Bishop": "B", "Queen": "Q", "King": "K"}
 
-# ===== Firebase 설정 (사용자가 제공한 값으로 고정) =====
-FIREBASE_SERVICE_ACCOUNT_JSON = "/home/kyb/cobot_ws/src/cobot2/config/kybfirebase.json"
+# ===== Firebase 설정 (env 주입) =====
+FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
 FIREBASE_DB_URL = "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app"
 FIREBASE_DB_PATH = "chess/board_state"
 
@@ -48,6 +48,10 @@ def now_iso_ms() -> str:
 def init_firebase():
     if firebase_admin._apps:
         return
+    if not FIREBASE_SERVICE_ACCOUNT_JSON:
+        raise RuntimeError(
+            "FIREBASE_SERVICE_ACCOUNT_PATH env var not set; cannot initialize Firebase"
+        )
     cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_JSON)
     firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
 
