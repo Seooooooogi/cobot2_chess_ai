@@ -25,7 +25,10 @@ JSON_PATH = os.path.join(BASE_DIR, "data.json")
 GRIPPER_NAME = "rg2"
 TOOLCHARGER_IP = "192.168.1.1"
 TOOLCHARGER_PORT = "502"
-gripper = RG(GRIPPER_NAME, TOOLCHARGER_IP, TOOLCHARGER_PORT)
+
+# CLAUDE.md Tier 0: virtual mode first. Default virtual for safety —
+# forgetting to set ROBOT_MODE never silently activates hardware.
+ROBOT_MODE = os.getenv("ROBOT_MODE", "virtual")
 
 class MovingChessPiece:
     def __init__(self, logger_node: Node):
@@ -48,8 +51,30 @@ class MovingChessPiece:
         self.posnumy_interval = 0.3
         self.z_posx_interval = 150
 
+        self.gripper = self._init_gripper()
+
         self.load_initial_config()
-        self.calculate()    
+        self.calculate()
+
+    def _init_gripper(self):
+        if ROBOT_MODE == "virtual":
+            self.log("[VIRTUAL] Skipping RG2 Modbus connect")
+            return None
+
+        self.log(
+            f"[REAL] Connecting to RG2 gripper at "
+            f"{TOOLCHARGER_IP}:{TOOLCHARGER_PORT}"
+        )
+        rg = RG(GRIPPER_NAME, TOOLCHARGER_IP, TOOLCHARGER_PORT)
+        # ROS2 Rule 7: fail loudly. pymodbus 2.x silently swallows
+        # connect failures; verify socket actually opened.
+        if not rg.client.is_socket_open():
+            raise RuntimeError(
+                f"RG2 gripper Modbus connect failed: "
+                f"{TOOLCHARGER_IP}:{TOOLCHARGER_PORT}"
+            )
+        self.log(f"[REAL] RG2 gripper connected")
+        return rg
 
     def log(self, msg: str):
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -80,15 +105,21 @@ class MovingChessPiece:
             self.log(f"JSON load error: {e}")
 
     def grip(self): # 10mm
-        gripper.close_gripper()
-        while gripper.get_status()[0]:
+        if self.gripper is None:
+            self.log("[VIRTUAL] grip (no-op)")
+            return
+        self.gripper.close_gripper()
+        while self.gripper.get_status()[0]:
             time.sleep(0.25)
-    
+
     # (0,1):50mm
 
     def release(self): # 35mm
-        gripper.open_gripper()
-        while gripper.get_status()[0]:
+        if self.gripper is None:
+            self.log("[VIRTUAL] release (no-op)")
+            return
+        self.gripper.open_gripper()
+        while self.gripper.get_status()[0]:
             time.sleep(0.25)
 
     def calculate(self):
@@ -227,7 +258,14 @@ class RobotActionServer(Node):
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback
         )
-        self.get_logger().info(f"Robot Action Server started for {ROBOT_ID} ({ROBOT_MODEL})")
+        self.get_logger().info(
+            f"Robot Action Server started for {ROBOT_ID} ({ROBOT_MODEL}, "
+            f"ROBOT_MODE={ROBOT_MODE})"
+        )
+        self.get_logger().warn(
+            "ROBOT_MODE must match DSR launch 'mode:=' arg "
+            "(arm/gripper mode mismatch is a Rule 9 safety risk)"
+        )
 
     def goal_callback(self, goal_request):
         """액션 목표 수락 여부 결정"""
