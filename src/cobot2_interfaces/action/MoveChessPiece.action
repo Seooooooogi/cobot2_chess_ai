@@ -1,0 +1,11 @@
+# Goal: 로봇이 수행할 명령
+string command  #(예: "e2e4", "e7e5", "a7a8q")
+string pieces_dict  #(예: "{"A1":"WR", "A2":"WP", ,,,}", json.dumps 로 보낼 것)
+---
+# Result: 최종 수행 결과
+bool success
+string message
+
+---
+# Feedback: 동작 중 피드백 (예: "기물 잡는 중", "이동 중")
+string status

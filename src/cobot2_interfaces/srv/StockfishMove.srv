@@ -1,0 +1,10 @@
+# Request
+string pieces_data       # JSON string: {"A1":"WR", "B3":"WP", ...}
+string turn             # "w" or "b"
+string last_move        # "E2E4"
+int32 skill_level       # Stockfish skill level (0-20)
+int32 depth             # Search depth (0~30 정도가 적당)
+---
+# Response
+string best_move        # e.g., "a2a4" or "a7a8q"
+bool success

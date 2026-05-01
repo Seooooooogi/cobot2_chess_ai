@@ -1,0 +1,53 @@
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+venv/
+.venv/
+**/venv_voice/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ROS2 / colcon
+install/
+build/
+log/
+
+# Firebase / credentials
+*-firebase-adminsdk-*.json
+serviceAccountKey.json
+*.serviceaccount.json
+**/*serviceAccount*.json
+**/*ServiceAccount*.json
+**/*firebase*.json
+**/*Firebase*.json
+**/kybfirebase*
+
+# Model weights (관리 외부화)
+*.pt
+*.pth
+*.tflite
+*.onnx
+*.engine
+
+# Outputs & artifacts
+outputs/
+*.log
+*.jsonl
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

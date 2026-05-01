@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>ROS2 Chess Control Center</title>
+  <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+  <style>
+    body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; background: #2c3e50; color: white; padding: 20px; }
+    .main-container { display: flex; gap: 20px; background: #34495e; padding: 20px; border-radius: 15px; }
+    #myBoard { width: 450px; }
+    .side-panel { width: 320px; display: flex; flex-direction: column; gap: 15px; }
+
+    .piece-box { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; background: #ecf0f1; padding: 10px; border-radius: 8px; margin-bottom: 10px; }
+    .piece-box img { width: 30px; cursor: grab; transition: 0.2s; }
+    .piece-box img:hover { transform: scale(1.1); }
+
+    .control-group { background: #2c3e50; padding: 15px; border-radius: 8px; border: 1px solid #7f8c8d; }
+    .slider-label { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 14px; }
+
+    .verification-group { display: flex; flex-direction: column; gap: 10px; padding: 15px; background: #1a252f; border-radius: 8px; border: 2px solid #f1c40f; }
+    .ox-container { display: flex; gap: 10px; }
+
+    button { border: none; border-radius: 8px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+    #btn-ok { background: #2ecc71; color: white; flex: 1; padding: 15px; font-size: 20px; }
+    #btn-ng { background: #e74c3c; color: white; flex: 1; padding: 15px; font-size: 20px; }
+    #btn-check { background: #f1c40f; color: #2c3e50; width: 100%; padding: 12px; font-size: 16px; display: none; }
+
+    .status-bar { margin-top: 10px; font-size: 13px; color: #f1c40f; text-align: center; font-weight: bold; min-height: 20px; }
+    input[readonly] { cursor: default; }
+
+    .voice-box-title { font-size: 12px; color: #bdc3c7; margin-bottom: 6px; }
+    .voice-box-text { font-size: 16px; font-weight: bold; color: #f1c40f; text-align: center; min-height: 24px; }
+  </style>
+</head>
+<body>
+
+  <h2>ROS2 Chess Control UI</h2>
+
+  <div class="main-container">
+    <div class="board-area">
+      <div class="piece-box" id="external-pieces">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/wP.png" data-piece="wP" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/wN.png" data-piece="wN" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/wB.png" data-piece="wB" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/wR.png" data-piece="wR" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/wQ.png" data-piece="wQ" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/wK.png" data-piece="wK" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/bP.png" data-piece="bP" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/bN.png" data-piece="bN" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/bB.png" data-piece="bB" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/bR.png" data-piece="bR" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/bQ.png" data-piece="bQ" draggable="true">
+        <img src="https://chessboardjs.com/img/chesspieces/wikipedia/bK.png" data-piece="bK" draggable="true">
+      </div>
+
+      <div id="myBoard"></div>
+
+      <div style="margin-top: 15px;">
+        <label style="font-size: 12px; color: #bdc3c7;">Stockfish Recommended Move:</label>
+        <input type="text" id="aiMoveDisplay" readonly
+          style="width: 100%; background: #2c3e50; color: #f1c40f; border: 1px solid #7f8c8d; padding: 12px; border-radius: 4px; font-size: 18px; font-weight: bold; text-align: center;">
+      </div>
+
+      <div class="status-bar" id="status">연결 중...</div>
+    </div>
+
+    <div class="side-panel">
+      <div class="control-group">
+        <div class="slider-label"><span>AI Depth</span><b id="depthVal">15</b></div>
+        <input type="range" id="depthRange" min="1" max="30" value="15" style="width:100%">
+
+        <div style="height:10px;"></div>
+
+        <div class="slider-label"><span>AI Difficulty</span><b id="difficultyVal">10</b></div>
+        <input type="range" id="difficultyRange" min="1" max="20" value="10" style="width:100%">
+      </div>
+
+      <div class="control-group">
+        <strong>Turn</strong><br>
+        <label><input type="radio" name="turn" value="w" checked> White (Robot)</label><br>
+        <label><input type="radio" name="turn" value="b"> Black (Human)</label>
+      </div>
+
+      <!-- Turn 아래: 음성 상태 표시 -->
+      <div class="control-group">
+        <div class="voice-box-title">Voice Status</div>
+        <div class="voice-box-text" id="voiceStatusText">-</div>
+      </div>
+
+      <!-- 그 아래: O/X 박스 -->
+      <div class="verification-group" id="verification-group" style="display: none;">
+        <strong style="color: #f1c40f; text-align: center; display: block; margin-bottom: 10px;">Verification</strong>
+        <div class="ox-container">
+          <button id="btn-ok">O</button>
+          <button id="btn-ng">X</button>
+        </div>
+        <button id="btn-check">CHECK & RE-ANALYZE</button>
+        <p style="font-size: 11px; color: #bdc3c7; margin-top: 5px;">
+          - O: 승인 (로봇 동작)<br>
+          - X: 수동 수정 모드 진입
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+  <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getDatabase, ref, onValue, update } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBgbhDeN58hbI3mSNTBn9X9lgg7LDmdVs4",
+      authDomain: "chess-43355.firebaseapp.com",
+      databaseURL: "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "chess-43355",
+      storageBucket: "chess-43355.firebasestorage.app",
+      messagingSenderId: "1064002421039",
+      appId: "1:1064002421039:web:e44d9b1392ae8a20eea1da"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    const boardRef = ref(db, "chess/board_state");
+    const controlRef = ref(db, "chess/ui_control");
+    const chessSystemRef = ref(db, "chess/chess_system");
+
+    let isManualMode = false;
+    let verificationOn = false;
+
+    // working 애니메이션 상태
+    let workingOn = false;
+    let workingTimer = null;
+    let workingDotCount = 0;
+    let workingStartTimeout = null;
+    let lastVoiceMessage = "";
+
+    const board = Chessboard("myBoard", {
+      draggable: true,
+      dropOffBoard: "trash",
+      pieceTheme: "https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png",
+      onDragStart: function(source, piece, position, orientation) {
+        if (!isManualMode) {
+          return false;
+        }
+      }
+    });
+
+    function convertToJS(pythonBoard) {
+      const newPos = {};
+      for (let sq in pythonBoard) {
+        const p = pythonBoard[sq];
+        newPos[sq.toLowerCase()] = p[0].toLowerCase() + p[1].toUpperCase();
+      }
+      return newPos;
+    }
+
+    function pushChessSystem() {
+      const depth = parseInt($("#depthRange").val(), 10);
+      const difficulty = parseInt($("#difficultyRange").val(), 10);
+      const turn = $('input[name="turn"]:checked').val();
+
+      update(chessSystemRef, {
+        depth: depth,
+        difficulty: difficulty,
+        turn: turn,
+        updated_at: new Date().toISOString()
+      });
+    }
+
+    $("#depthRange").on("input", e => { $("#depthVal").text(e.target.value); pushChessSystem(); });
+    $("#difficultyRange").on("input", e => { $("#difficultyVal").text(e.target.value); pushChessSystem(); });
+    $('input[name="turn"]').on("change", () => { pushChessSystem(); });
+    pushChessSystem();
+
+    function stopWorkingAnimation() {
+      workingOn = false;
+      if (workingTimer) { clearInterval(workingTimer); workingTimer = null; }
+      if (workingStartTimeout) { clearTimeout(workingStartTimeout); workingStartTimeout = null; }
+      workingDotCount = 0;
+    }
+
+    function startWorkingAnimationAfter2s() {
+      if (workingStartTimeout) clearTimeout(workingStartTimeout);
+
+      workingStartTimeout = setTimeout(() => {
+        if (!workingOn) return;
+
+        if (workingTimer) clearInterval(workingTimer);
+        workingDotCount = 0;
+
+        workingTimer = setInterval(() => {
+          workingDotCount = (workingDotCount % 3) + 1;
+          const dots = ".".repeat(workingDotCount);
+          $("#voiceStatusText").text(`작동 중${dots}`);
+        }, 400);
+      }, 2000);
+    }
+
+    // 실시간 board_state 반영: verification이 꺼져있을 때만
+    onValue(boardRef, (snapshot) => {
+      if (isManualMode) return;
+      if (verificationOn) return;
+
+      const data = snapshot.val();
+      if (data && data.board) {
+        const convertedPos = convertToJS(data.board);
+        board.position(convertedPos);
+        $("#status").text("카메라 실시간 인식 중...");
+      }
+    });
+
+    onValue(controlRef, (snapshot) => {
+      const data = snapshot.val();
+      if (!data) return;
+
+      // 추천 수 표시
+      if (data.ai_suggested_move) {
+        $("#aiMoveDisplay").val(data.ai_suggested_move);
+      }
+
+      // voice_message 표시
+      if (typeof data.voice_message === "string") {
+        lastVoiceMessage = data.voice_message;
+
+        // working 애니메이션이 돌고 있으면 텍스트를 애니메이션이 덮어쓰기 때문에,
+        // working이 꺼져있을 때만 즉시 반영
+        if (!workingOn) {
+          $("#voiceStatusText").text(lastVoiceMessage || "-");
+        }
+
+        // "감지!"가 들어오면, working이 true로 바뀔 때 2초 뒤 애니메이션 시작하게 준비
+        // (working 플래그는 main이 올림)
+      }
+
+      // verification 모드
+      verificationOn = (data.verification === true);
+
+      if (verificationOn) {
+        $("#verification-group").fadeIn();
+        $("#status").text("인식 결과 확인 중. O 또는 X를 눌러주세요.");
+
+        // 핵심: verification 중에는 final_board만 표시
+        if (!isManualMode && data.final_board && typeof data.final_board === "object") {
+          const convertedPos = convertToJS(data.final_board);
+          board.position(convertedPos);
+        }
+      } else {
+        $("#verification-group").fadeOut();
+      }
+
+      // working 모드 (로봇 동작 중)
+      if (data.working === true) {
+        if (!workingOn) {
+          workingOn = true;
+          // 감지! 다음 단계로 작동 중...을 2초 후부터 표시
+          startWorkingAnimationAfter2s();
+        }
+      } else {
+        if (workingOn) {
+          stopWorkingAnimation();
+          // working 종료 시, 마지막 voice_message로 복귀
+          $("#voiceStatusText").text(lastVoiceMessage || "-");
+        }
+      }
+    });
+
+    $("#btn-ok").click(() => {
+      isManualMode = false;
+      $("#btn-check").hide();
+
+      // ✅ 여기만 추가/수정: APPROVED 시점에도 현재 보드 상태를 corrected_board로 함께 보냄
+      const currentPos = board.position();
+      const pythonFormatBoard = {};
+      for (let sq in currentPos) {
+        const p = currentPos[sq];
+        pythonFormatBoard[sq.toUpperCase()] = p[0].toUpperCase() + p[1].toUpperCase();
+      }
+
+      update(controlRef, {
+        corrected_board: pythonFormatBoard,
+        user_decision: "APPROVED",
+        timestamp: new Date().toISOString()
+      });
+
+      $("#status").text("승인됨: 로봇이 이동합니다.");
+    });
+
+    $("#btn-ng").click(() => {
+      isManualMode = true;
+      $("#btn-check").fadeIn();
+      $("#status").text("수정 모드: 기물을 옮긴 후 CHECK를 누르세요.");
+    });
+
+    $("#btn-check").click(() => {
+      const currentPos = board.position();
+      const pythonFormatBoard = {};
+
+      for (let sq in currentPos) {
+        const p = currentPos[sq];
+        pythonFormatBoard[sq.toUpperCase()] = p[0].toUpperCase() + p[1].toUpperCase();
+      }
+
+      // 핵심: board_state에 직접 쓰지 않고, main으로 전달
+      update(controlRef, {
+        corrected_board: pythonFormatBoard,
+        user_decision: "RE-CHECKED",
+        timestamp: new Date().toISOString()
+      });
+
+      $("#btn-check").hide();
+      isManualMode = false;
+      $("#status").text("수정 완료. 메인에 전달하여 최종 보드로 반영 중...");
+    });
+
+    $("#external-pieces img").on("dragstart", function(e) {
+      if (!isManualMode) {
+        e.preventDefault();
+        return false;
+      }
+      e.originalEvent.dataTransfer.setData("piece", $(this).data("piece"));
+    });
+
+    $("#myBoard").on("dragover", e => e.preventDefault());
+
+    $("#myBoard").on("drop", function(e) {
+      if (!isManualMode) return;
+
+      e.preventDefault();
+      const piece = e.originalEvent.dataTransfer.getData("piece");
+      const elementAtPoint = document.elementFromPoint(e.clientX, e.clientY);
+      const squareEl = $(elementAtPoint).closest("[data-square]");
+      const square = squareEl.data("square");
+
+      if (square && piece) {
+        const currentPos = board.position();
+        currentPos[square] = piece;
+        board.position(currentPos);
+      }
+    });
+  </script>
+</body>
+</html>
