@@ -48,6 +48,9 @@ outputs/
 .vscode/
 .idea/
 
+# Claude Code (user-local state)
+.claude/settings.local.json
+
 # OS
 .DS_Store
 Thumbs.db
