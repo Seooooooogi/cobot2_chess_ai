@@ -1,3 +1,39 @@
+"""Vision pipeline — chess piece recognition + Firebase write (entry point: ``ros2 run cobot2 object``).
+
+NOT a ROS2 node:
+    This file does not import ``rclpy``, define a ``Node`` subclass, or call ``rclpy.init``. It is
+    registered as a console script under ``cobot2`` but operates entirely outside the ROS2 graph.
+    Communication with ``main.py`` flows through Firebase Realtime DB
+    (``chess/board_state``) — Firebase is the message bus → ROS2 Rule 2 / Rule 7 violation (V1-1 CRITICAL).
+
+Pipeline (``main()``, line 242):
+    OpenCV ``VideoCapture(SOURCE)``
+      → YOLO inference (foot-point per box)
+      → grid polygon hit-test (``load_chess_grid``)
+      → HSV V-channel threshold → piece color
+      → ResNet18 classifier (6 chess piece classes) → ``WP``/``BR``/...
+      → ``board_dict`` → Firebase ``chess/board_state``
+
+Throttling:
+    - ``ANALYZE_INTERVAL_SEC = 0.20`` (line 72) — minimum gap between YOLO+ResNet runs.
+    - ``FIREBASE_UPDATE_MIN_INTERVAL_SEC = 0.20`` (line 73) — minimum gap between DB writes.
+    - ``ONLY_UPDATE_ON_CHANGE`` (line 74) — skip write if normalized board dict unchanged.
+
+External Dependencies:
+    - YOLO weights:   ``YOLO_PATH``  (line 54) — ``YOLO_MODEL_PATH`` env var (required).
+    - ResNet weights: ``RESNET_PATH`` (line 55) — ``RESNET_MODEL_PATH`` env var (required).
+    - Grid JSON:      ``GRID_PATH``  (line 56) — ``CHESS_GRID_PATH`` env var (required).
+    - Camera:         ``SOURCE`` (line 57) — ``CAMERA_SOURCE`` env var (default ``3``).
+    - Firebase:       ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var (line 66); ``FIREBASE_DATABASE_URL`` env var (line 67).
+
+Issues (Phase 1-1 doc Node 4):
+    - CRITICAL  V1-1: registered as a ROS2 entry point but does not participate in the ROS2 graph.
+    - V1-2 RESOLVED 2026-05-01: ``YOLO_PATH``/``RESNET_PATH``/``GRID_PATH`` env-ized via ``YOLO_MODEL_PATH``/``RESNET_MODEL_PATH``/``CHESS_GRID_PATH`` env vars (lines 54-56).
+    - V1-4 RESOLVED 2026-05-01: ``SOURCE`` env-ized via ``CAMERA_SOURCE`` env var (line 57, default 3).
+    # verify needed V1-7: piece-color HSV V-channel thresholds (80, 105) — robustness across lighting.
+    # verify needed V1-8: confirm ``CHESS_GRID_PATH`` env var points to valid ``chess_grid.json`` — content match with repo copy unverified.
+"""
+
 import cv2
 import torch
 import torch.nn as nn
@@ -57,6 +93,21 @@ def init_firebase():
 
 
 def load_chess_grid(json_path):
+    """Load grid polygons from ``chess_grid.json``.
+
+    Args:
+        json_path: str — path to JSON file with ``{"A1": [[x,y],...], ...}``.
+
+    Returns:
+        dict[str, np.ndarray] — square name → polygon points reshaped to
+        ``(-1, 1, 2)`` int32 (the layout ``cv2.pointPolygonTest`` expects),
+        or ``None`` if the file does not exist.
+
+    Notes:
+        # verify needed V1-8: ``GRID_PATH`` is now ``CHESS_GRID_PATH`` env var (Phase 4 env-ize 2026-05-01).
+        ``src/cobot2/config/chess_grid.json`` and ``src/cobot2/cobot2/chess_grid.json`` exist (byte-identical, Phase 1-4) —
+        whether the env var points to the correct file is unverified.
+    """
     if not os.path.exists(json_path):
         return None
     with open(json_path, "r") as f:
@@ -65,6 +116,24 @@ def load_chess_grid(json_path):
 
 
 def get_piece_color_improved(img, box):
+    """Classify a detected piece as White / Black / Unknown via HSV V-channel threshold.
+
+    Args:
+        img: BGR frame (np.ndarray).
+        box: ``(x1, y1, x2, y2)`` bounding box (any iterable of 4 numbers).
+
+    Returns:
+        ``"White"``, ``"Black"``, or ``"Unknown"`` (when the ROI is empty).
+
+    Method:
+        Crops the ROI to the band ``y ∈ [y1+0.2h, y1+0.4h]``, ``x ∈ [x1+0.42w, x1+0.58w]``
+        (upper-middle strip of the bounding box), converts to HSV, and inspects the V channel.
+        Returns ``"Black"`` if more than 30% of pixels have V < 80 *or* the median V < 105.
+
+    Notes:
+        # verify needed V1-7: HSV V-channel thresholds (80, 105) and the strip percentages
+        (0.2, 0.4, 0.42, 0.58) are not validated for robustness across lighting conditions.
+    """
     x1, y1, x2, y2 = map(int, box)
     w, h = x2 - x1, y2 - y1
 
@@ -91,6 +160,29 @@ def load_resnet_model(path):
 
 
 def analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, preprocess):
+    """Run YOLO + grid mapping + color + ResNet on a single frame, return board dict.
+
+    Args:
+        frame:          BGR camera frame.
+        yolo_model:     ``ultralytics.YOLO`` instance loaded from ``YOLO_PATH``.
+        resnet_model:   ResNet18 with 6-class final layer (Pawn/Rook/Knight/Bishop/Queen/King).
+        grid_polygons:  output of ``load_chess_grid`` or ``None`` (cells without grid → skipped).
+        device:         torch device for ResNet inference.
+        preprocess:     torchvision transform pipeline (Resize 224 → ToTensor → ImageNet Normalize).
+
+    Returns:
+        dict[str, str] — mapping square name (``"A1"``..``"H8"``) → piece code (``"WP"``/``"BR"``/...).
+        Cells with no detected piece are absent from the dict.
+
+    Side Effects:
+        None (pure function over the frame).
+
+    Logic:
+        For each YOLO box: take the foot point ``((x1+x2)/2, y2)``, find the first grid polygon
+        containing it (``cv2.pointPolygonTest``), classify color via ``get_piece_color_improved``,
+        crop to RGB and run ResNet to pick a piece type, then write ``"{W|B}{P|R|N|B|Q|K}"``
+        into the corresponding cell. YOLO is invoked with ``conf=0.5, iou=0.3``.
+    """
     results = yolo_model(frame, conf=0.5, iou=0.3, verbose=False)
     board_dict = {}
 
