@@ -24,7 +24,7 @@ External Dependencies:
 Issues (Phase 1-1 doc Node 1):
     - M1-3 RESOLVED 2026-05-01: ``FIREBASE_SERVICE_ACCOUNT_JSON`` env-ized via ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var; ``FIREBASE_DB_URL`` via ``FIREBASE_DATABASE_URL`` env var.
     - M1-1 RESOLVED 2026-05-04: ``~/start_sampling`` (Trigger) 로 대체.
-    - M1-2 PARTIAL: voice sub QoS 제거 완료. status_pub 항목은 voice_status 제거로 함께 해소.
+    - ~~M1-2: pub/sub QoS 미명시 (Rule 4)~~ **RESOLVED 2026-05-04**: voice 제거로 pub/sub 0건. service/action endpoint에 ``qos_profile_services_default`` / ``qos_profile_action_status_default`` 명시 (line 234-256).
     - IMPORTANT M1-4: Firebase serves as vision↔main message bus → ROS2 Rule 7 (external channel as transport).
     - MINOR M1-5: workflow threads use ``time.sleep`` polling on Futures inside ``_call_stockfish`` and ``_send_robot_action_and_wait`` — Future callbacks preferred.
     - M1-6 RESOLVED 2026-05-04: Service 로 대체 — voice_control_node 미실행 무한 대기 해소.
@@ -41,6 +41,7 @@ from datetime import datetime
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import qos_profile_services_default, qos_profile_action_status_default
 from std_srvs.srv import Trigger
 
 import firebase_admin
@@ -230,10 +231,28 @@ class MainController(Node):
         self.fb = FirebaseClient(FIREBASE_SERVICE_ACCOUNT_JSON, FIREBASE_DB_URL)
         self.sampler = BoardStateSampler(self.fb, BOARD_STATE_PATH, SAMPLE_COUNT, SAMPLE_INTERVAL_SEC)
 
-        self.ai_client = self.create_client(StockfishMove, STOCKFISH_SERVICE_NAME)
-        self.robot_action_client = ActionClient(self, MoveChessPiece, ROBOT_ACTION_NAME)
+        self.ai_client = self.create_client(
+            StockfishMove,
+            STOCKFISH_SERVICE_NAME,
+            qos_profile=qos_profile_services_default,
+        )
+        self.robot_action_client = ActionClient(
+            self,
+            MoveChessPiece,
+            ROBOT_ACTION_NAME,
+            goal_service_qos_profile=qos_profile_services_default,
+            result_service_qos_profile=qos_profile_services_default,
+            cancel_service_qos_profile=qos_profile_services_default,
+            feedback_sub_qos_profile=qos_profile_services_default,
+            status_sub_qos_profile=qos_profile_action_status_default,
+        )
 
-        self.start_sampling_srv = self.create_service(Trigger, "~/start_sampling", self._on_start_sampling)
+        self.start_sampling_srv = self.create_service(
+            Trigger,
+            "~/start_sampling",
+            self._on_start_sampling,
+            qos_profile=qos_profile_services_default,
+        )
 
         self._state_lock = threading.Lock()
         self._state = "IDLE"
