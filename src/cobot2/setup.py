@@ -8,15 +8,13 @@ setup(
     name=package_name,
     version='0.0.1',
     packages=find_packages(exclude=['test']),
-    data_files=[ 
-    	('share/ament_index/resource_index/packages', ['resource/' + package_name]), 
-    	('share/' + package_name, ['package.xml']), 
-    	(os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')), 	 
-    	(os.path.join('share', package_name, 'config'), glob('config/*.json')), # 추가: 모델 파일 설치  
-    	(os.path.join('share', package_name, 'models'), glob('models/*')), # 추가: 환경 변수 및 데이터 파일  
-    	(os.path.join('share', package_name), ['.env', 'cobot2/data.json']),
-        (os.path.join('share', package_name), glob('cobot2/*.sh')),
-        (os.path.join('lib', package_name), ['cobot2/run_voice.sh']), 
+    data_files=[
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.json')),
+        (os.path.join('share', package_name, 'models'), glob('models/*')),
+        (os.path.join('share', package_name), ['.env', 'cobot2/data.json']),
         ],
     install_requires=['setuptools'],
     zip_safe=True,

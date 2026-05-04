@@ -1,4 +1,38 @@
+"""MainController node — chess workflow orchestrator (entry point: ``ros2 run cobot2 main``).
+
+Role:
+    Coordinates the end-to-end chess turn:
+    sample board state → user verification (Firebase UI) → Stockfish best move → robot action.
+    State machine: ``IDLE`` → ``SAMPLING`` → ``WAIT_DECISION`` → ``RUNNING`` → ``IDLE``
+    (transitions guarded by ``self._state_lock``).
+
+ROS2 Interfaces:
+    Service: ``~/start_sampling`` (std_srvs/Trigger) — state-change trigger; IDLE→SAMPLING.
+             Resolves to /main_controller/start_sampling.
+    Client: Service ``StockfishMove``      (cobot2_interfaces/StockfishMove)
+    Client: Action  ``move_chess_piece``  (cobot2_interfaces/MoveChessPiece)
+
+Timer & Threads:
+    - Timer ``_poll_ui_decision`` — 0.2 s, polls Firebase ``ui_control`` for APPROVED / RE-CHECKED
+    - Daemon thread ``_job_make_and_publish_board`` — 5 samples × 1 s + majority vote, spawned in ``_on_start_sampling``
+    - Daemon thread ``_job_stockfish_then_robot_then_wakeup`` — service call + action goal, spawned in ``_poll_ui_decision``
+
+External Dependencies:
+    - Firebase Realtime DB — read/write ``chess/board_state``, ``chess/ui_control``, ``chess/chess_system``
+    - cobot2_interfaces — ``StockfishMove.srv``, ``MoveChessPiece.action``
+
+Issues (Phase 1-1 doc Node 1):
+    - M1-3 RESOLVED 2026-05-01: ``FIREBASE_SERVICE_ACCOUNT_JSON`` env-ized via ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var; ``FIREBASE_DB_URL`` via ``FIREBASE_DATABASE_URL`` env var.
+    - M1-1 RESOLVED 2026-05-04: ``~/start_sampling`` (Trigger) 로 대체.
+    - M1-2 PARTIAL: voice sub QoS 제거 완료. status_pub 항목은 voice_status 제거로 함께 해소.
+    - IMPORTANT M1-4: Firebase serves as vision↔main message bus → ROS2 Rule 7 (external channel as transport).
+    - MINOR M1-5: workflow threads use ``time.sleep`` polling on Futures inside ``_call_stockfish`` and ``_send_robot_action_and_wait`` — Future callbacks preferred.
+    - M1-6 RESOLVED 2026-05-04: Service 로 대체 — voice_control_node 미실행 무한 대기 해소.
+    - M1-7 RESOLVED 2026-05-04: voice_status pub 제거 (옵션 a) — dead pub 해소.
+"""
+
 import json
+import os
 import time
 import threading
 from collections import Counter
@@ -6,8 +40,8 @@ from datetime import datetime
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
 from rclpy.action import ActionClient
+from std_srvs.srv import Trigger
 
 import firebase_admin
 from firebase_admin import credentials, db
@@ -17,8 +51,8 @@ from cobot2_interfaces.action import MoveChessPiece
 
 
 # ================= [설정 상수: 클래스 밖] =================
-FIREBASE_SERVICE_ACCOUNT_JSON = "/home/kyb/cobot_ws/src/cobot2/config/kybfirebase.json"
-FIREBASE_DB_URL = "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app"
+FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+FIREBASE_DB_URL = os.getenv("FIREBASE_DATABASE_URL", "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app")
 
 BOARD_STATE_PATH = "chess/board_state"
 UI_CONTROL_PATH = "chess/ui_control"
@@ -26,13 +60,6 @@ CHESS_SYSTEM_PATH = "chess/chess_system"
 
 SAMPLE_COUNT = 5
 SAMPLE_INTERVAL_SEC = 1.0
-
-VOICE_COMMAND_TOPIC = "voice_command"
-VOICE_STATUS_TOPIC = "voice_status"
-VOICE_UI_STATUS_TOPIC = "voice_ui_status"
-
-PASS_COMMAND = "pass"
-WAKE_UP_SIGNAL = "WAKE_UP"
 
 STOCKFISH_SERVICE_NAME = "StockfishMove"
 SERVICE_TIMEOUT_SEC = 20.0
@@ -180,6 +207,23 @@ class BoardStateSampler:
 
 
 class MainController(Node):
+    """Workflow orchestrator node.
+
+    State machine:
+        IDLE → SAMPLING → WAIT_DECISION → RUNNING → IDLE.
+
+    Triggers:
+        - Service ``~/start_sampling`` (Trigger): IDLE → SAMPLING.
+          Returns success=False with message="busy: state=<state>" if not IDLE.
+        - Firebase ``ui_control.user_decision == "APPROVED"`` (timer poll): WAIT_DECISION → RUNNING.
+        - Firebase ``ui_control.user_decision == "RE-CHECKED"`` (timer poll): stays in WAIT_DECISION,
+          updates ``final_board`` from ``corrected_board``.
+
+    Concurrency:
+        ``self._state_lock`` (mutex) guards ``self._state`` and ``self._job_id``.
+        Two daemon worker threads (one per phase) run alongside the rclpy executor.
+    """
+
     def __init__(self):
         super().__init__("main_controller")
 
@@ -189,9 +233,7 @@ class MainController(Node):
         self.ai_client = self.create_client(StockfishMove, STOCKFISH_SERVICE_NAME)
         self.robot_action_client = ActionClient(self, MoveChessPiece, ROBOT_ACTION_NAME)
 
-        self.status_pub = self.create_publisher(String, VOICE_STATUS_TOPIC, 10)
-        self.cmd_sub = self.create_subscription(String, VOICE_COMMAND_TOPIC, self._on_voice_command, 10)
-        self.voice_ui_sub = self.create_subscription(String, VOICE_UI_STATUS_TOPIC, self._on_voice_ui_status, 10)
+        self.start_sampling_srv = self.create_service(Trigger, "~/start_sampling", self._on_start_sampling)
 
         self._state_lock = threading.Lock()
         self._state = "IDLE"
@@ -199,19 +241,8 @@ class MainController(Node):
 
         self.timer = self.create_timer(DECISION_POLL_SEC, self._poll_ui_decision)
 
-        self.get_logger().info("MainController ready. Waiting for voice_command='pass'.")
+        self.get_logger().info("MainController ready. Service: /main_controller/start_sampling (std_srvs/Trigger).")
 
-    def _on_voice_ui_status(self, msg: String):
-        text = (msg.data or "").strip()
-        if not text:
-            return
-        try:
-            self.fb.update_ui_control(UI_CONTROL_PATH, {
-                "voice_message": text,
-                "voice_updated_at": datetime.now().isoformat(),
-            })
-        except Exception as e:
-            self.get_logger().warn(f"Failed to update voice_message: {e}")
 
     def _reset_ui_for_new_job(self, job_id: str):
         try:
@@ -227,26 +258,45 @@ class MainController(Node):
         except Exception as e:
             self.get_logger().warn(f"UI reset failed: {e}")
 
-    def _on_voice_command(self, msg: String):
-        cmd = (msg.data or "").strip().lower()
-        if cmd != PASS_COMMAND:
-            return
-
+    def _on_start_sampling(
+        self, request: Trigger.Request, response: Trigger.Response
+    ) -> Trigger.Response:
         with self._state_lock:
             if self._state != "IDLE":
-                self.get_logger().warn(f"Ignoring trigger (state={self._state}).")
-                return
+                response.success = False
+                response.message = f"busy: state={self._state}"
+                self.get_logger().warn(
+                    f"start_sampling rejected (state={self._state})."
+                )
+                return response
             self._state = "SAMPLING"
             self._job_id = now_iso_ms()
             job_id = self._job_id
 
-        self.get_logger().info(f"[PASS] received. job_id={job_id}")
+        self.get_logger().info(f"[start_sampling] triggered. job_id={job_id}")
         self._reset_ui_for_new_job(job_id)
-
-        t = threading.Thread(target=self._job_make_and_publish_board, args=(job_id,), daemon=True)
+        t = threading.Thread(
+            target=self._job_make_and_publish_board, args=(job_id,), daemon=True
+        )
         t.start()
+        response.success = True
+        response.message = "sampling started"
+        return response
 
     def _job_make_and_publish_board(self, job_id: str):
+        """Worker thread (daemon) — sample board state and publish for user verification.
+
+        Args:
+            job_id: str — timestamp-based identifier set when SAMPLING was entered.
+
+        Side Effects:
+            - Reads Firebase ``chess/board_state`` ``SAMPLE_COUNT`` (=5) times at
+              ``SAMPLE_INTERVAL_SEC`` (=1.0 s) intervals; computes per-square majority vote.
+            - Writes the voted board back to Firebase ``chess/board_state``.
+            - Sets ``ui_control.verification = True`` and uploads ``final_board``.
+            - On success: transitions ``self._state`` to ``WAIT_DECISION``.
+            - On exception: transitions back to ``IDLE``.
+        """
         try:
             self.get_logger().info("[SAMPLING] start: read board_state 5 times (1s interval)")
 
@@ -278,7 +328,6 @@ class MainController(Node):
             with self._state_lock:
                 self._state = "IDLE"
                 self._job_id = ""
-            self._publish_wake_up()
 
     def _poll_ui_decision(self):
         with self._state_lock:
@@ -337,6 +386,22 @@ class MainController(Node):
             self.get_logger().error(f"Decision polling error: {e}")
 
     def _job_stockfish_then_robot_then_wakeup(self, job_id: str):
+        """Worker thread (daemon) — call Stockfish and send robot action.
+
+        Args:
+            job_id: str — timestamp-based identifier set when WAIT_DECISION was entered.
+
+        Side Effects:
+            - Reads Firebase ``ui_control`` to choose the input board (``corrected_board`` if present
+              and non-empty, else ``final_board``, else live ``board_state``).
+            - Calls service ``StockfishMove`` with the board + ``depth``/``difficulty``/``turn`` from
+              ``chess_system``. On empty ``best_move`` writes ``ai_suggested_move = "게임 종료"`` to
+              ``ui_control`` and returns (game-over branch).
+            - Sends an action goal to ``move_chess_piece`` and waits up to
+              ``ROBOT_ACTION_RESULT_TIMEOUT_SEC`` (=180 s) for the result.
+            - In the ``finally`` block: writes ``ui_control.working = False`` and transitions
+              ``self._state`` to ``IDLE``.
+        """
         try:
             ui = self.fb.get_ui_control(UI_CONTROL_PATH)
 
@@ -402,7 +467,6 @@ class MainController(Node):
             except Exception:
                 pass
 
-            self._publish_wake_up()
             with self._state_lock:
                 self._state = "IDLE"
                 self._job_id = ""
@@ -470,13 +534,6 @@ class MainController(Node):
 
         return bool(result.result.success)
 
-    def _publish_wake_up(self):
-        try:
-            wake = String()
-            wake.data = WAKE_UP_SIGNAL
-            self.status_pub.publish(wake)
-        except Exception as e:
-            self.get_logger().error(f"Failed to publish WAKE_UP: {e}")
 
 
 def main(args=None):
