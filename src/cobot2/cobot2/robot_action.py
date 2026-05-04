@@ -99,6 +99,10 @@ class MovingChessPiece:
             self.posj_tomb = data.get("무덤_관절좌표", self.posj_tomb)
             self.posj_tomb_over = data.get("무덤_관절좌표_오버", self.posj_tomb_over)
             self.z_posx_interval = data.get("z축_간격", self.z_posx_interval)
+            self.posnumx_interval = data.get("posnumx_interval", self.posnumx_interval)
+            self.poschary_interval = data.get("poschary_interval", self.poschary_interval)
+            self.posnumy_interval = data.get("posnumy_interval", self.posnumy_interval)
+            self.poscharx_interval = data.get("poscharx_interval", self.poscharx_interval)
 
             self.log("JSON sync done")
         except Exception as e:
