@@ -33,10 +33,10 @@
                                              │ chess/board_state
                                              ▼
    ┌──────────────────────┐         ┌──────────────────────────┐
-   │  voice_control_node  │  topic  │   main.py                │
-   │  (Phase 1+ 비활성화)  │ ─────▶ │   MainController         │
-   │  (별도 노드, scope밖)│ voice_  │   node: main_controller  │
-   └──────────────────────┘ command │                          │
+   │  CLI / 외부 스크립트  │ service │   main.py                │
+   │                      │ ──────▶ │   MainController         │
+   │  ros2 service call   │~/start_ │   node: main_controller  │
+   └──────────────────────┘ sampling│                          │
                                     │   Firebase read/write    │
                                     │   (board_state,          │
                                     │    ui_control,           │
@@ -73,11 +73,9 @@
 
 | Direction | Type | Name | Msg/Srv/Action | QoS | 위치 |
 |-----------|------|------|----------------|-----|------|
-| Pub | Topic | `voice_status` | `std_msgs/String` | depth=10 (default) | line 192 |
-| Sub | Topic | `voice_command` | `std_msgs/String` | depth=10 (default) | line 193 |
-| Sub | Topic | `voice_ui_status` | `std_msgs/String` | depth=10 (default) | line 194 |
-| Client | Service | `StockfishMove` | `cobot2_interfaces/StockfishMove` | default | line 189 |
-| Client | Action | `move_chess_piece` | `cobot2_interfaces/MoveChessPiece` | default | line 190 |
+| Server | Service | `~/start_sampling` → `/main_controller/start_sampling` | `std_srvs/Trigger` | `rmw_qos_profile_services_default` | `_on_start_sampling` |
+| Client | Service | `StockfishMove` | `cobot2_interfaces/StockfishMove` | default | |
+| Client | Action | `move_chess_piece` | `cobot2_interfaces/MoveChessPiece` | default | |
 
 ### Timer
 - `_poll_ui_decision` — 0.2s 주기, Firebase ui_control 폴링 (line 200)
@@ -88,7 +86,7 @@
 
 ### State Machine
 - `_state ∈ {IDLE, SAMPLING, WAIT_DECISION, RUNNING}` 보호: `_state_lock` (mutex)
-- 트리거: `voice_command="pass"` 수신 → SAMPLING 진입 (line 230-247)
+- 트리거: Service `~/start_sampling` (Trigger) 호출 → SAMPLING 진입 (`_on_start_sampling`)
 - 전이: 샘플 완료 → WAIT_DECISION → UI APPROVED → RUNNING → IDLE
 
 ### External Dependencies
@@ -102,13 +100,13 @@
 
 | # | Severity | 내용 | Rule |
 |---|----------|------|------|
-| M1-1 | IMPORTANT | `voice_command` Topic으로 상태 변경 트리거 → 응답 필요 명령은 Service여야 함 | ROS2 Rule 2 |
-| M1-2 | IMPORTANT | QoS 단축 표기(`10`) 사용. `QoSProfile` 명시 필요 | ROS2 Rule 4 |
+| M1-1 | ~~IMPORTANT~~ | ~~`voice_command` Topic으로 상태 변경 트리거~~ → **RESOLVED 2026-05-04**: `~/start_sampling` (Trigger) Service로 교체. | ROS2 Rule 2 |
+| M1-2 | IMPORTANT | QoS 단축 표기(`10`) 사용. `QoSProfile` 명시 필요 — voice Sub QoS 제거 완료. Service는 `rmw_qos_profile_services_default` 적용. | ROS2 Rule 4 |
 | M1-3 | CRITICAL | `FIREBASE_SERVICE_ACCOUNT_JSON` 하드코딩 (`/home/kyb/...`) — 다른 사용자 시스템 잔재 | CLAUDE.md II.5 |
 | M1-4 | IMPORTANT | Firebase가 vision↔main 메시지 버스 — ROS2 외부 채널을 통신 경로로 사용 | ROS2 Rule 7 |
 | M1-5 | MINOR | 워크플로 thread 내 `time.sleep` 폴링 (line 424,447,461) — Future 콜백 활용 권장 | ROS2 Rule 7 |
-| M1-6 | `# verify needed` | `voice_command='pass'` 수신 동작 — voice_control_node 실행 없이 main만 띄우면 무한 대기 (handoff 검증) | — |
-| M1-7 | `# verify needed` | `WAKE_UP_SIGNAL` publish가 voice 노드에서 어떻게 처리되는지 미검증 | — |
+| M1-6 | ~~`# verify needed`~~ | ~~`voice_command='pass'` 수신 동작 — voice_control_node 실행 없이 main만 띄우면 무한 대기~~ → **RESOLVED 2026-05-04**: Service로 대체, voice_control_node 의존 제거. | — |
+| M1-7 | ~~`# verify needed`~~ | ~~`WAKE_UP_SIGNAL` publish가 voice 노드에서 어떻게 처리되는지 미검증~~ → **RESOLVED 2026-05-04**: voice_status Pub + `_publish_wake_up()` 제거 (dead pub 해소, 옵션 a). | — |
 
 ---
 

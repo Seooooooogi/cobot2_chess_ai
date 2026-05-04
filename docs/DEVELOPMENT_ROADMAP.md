@@ -50,7 +50,7 @@
 
 ## Phase 3: Virtual-Mode Verification (goal: 단독·통합 동작 확인, 1-1.5일)
 - [ ] 3-1. 비전 노드 단독 — 카메라 입력에서 체스말 8x8 좌표 인식 결과 로그/시각화.
-- [ ] 3-2. 음성 인식 노드 단독 — 명령어 인식 정확도 sample 측정.
+- ~~[ ] 3-2. 음성 인식 노드 단독 — 명령어 인식 정확도 sample 측정.~~ (voice stack 삭제 — 2026-05-04)
 - [ ] 3-3. Stockfish 엔진 노드 단독 — 입력 FEN/move에 대한 응답 확인.
 - [ ] 3-4. 로봇 동작 노드 단독 (virtual) — 좌표 입력 → 그리퍼 + 이동 시퀀스 완료.
 - [ ] 3-5. 통합 시퀀스 (virtual) — 사람 차례 인식 → 엔진 응답 → 로봇 동작이
@@ -71,6 +71,7 @@
 - [ ] 4-2. CRITICAL 항목 우선 수정 — 변경 1건당 1 커밋, virtual 모드 회귀 확인.
 - [ ] 4-3. 그 외 개선은 가독성·구조 위주. 동작 변경 시 baseline(3-6) 대조 의무.
 - [ ] 4-4. 회귀 발생 시 즉시 롤백 (Hard Rule #2).
+- [x] 4-voice. voice_command Topic → std_srvs/Trigger Service 전환 (2026-05-04). voice stack 삭제 (옵션 A). M1-1/M1-6/M1-7 RESOLVED.
 
 **Exit**: CRITICAL 0건, baseline 회귀 0건.
 
