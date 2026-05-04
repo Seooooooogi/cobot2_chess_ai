@@ -12,18 +12,19 @@ Internal State:
     - ``self.dict_memory`` — last board dict used to infer ``last_move`` for en-passant heuristics (line 69; ``dict_to_fen`` line 114-129).
 
 External Dependencies:
-    - Stockfish binary at ``/usr/games/stockfish`` (module constant ``STOCKFISH_PATH``, line 37)
+    - Stockfish binary at ``$STOCKFISH_PATH`` (env var, default ``/usr/games/stockfish``, line 38)
     - ``stockfish`` PyPI library
     - ``cobot2_interfaces.srv.StockfishMove``
 
 Issues (Phase 1-1 doc Node 2):
-    - IMPORTANT S1-1: ``STOCKFISH_PATH`` is a module constant — Phase 4: env-ize.
+    - ~~IMPORTANT S1-1: ``STOCKFISH_PATH`` is a module constant — Phase 4: env-ize.~~ **RESOLVED 2026-05-04**: ``os.getenv("STOCKFISH_PATH", ...)``.
     - MINOR     S1-2: Service QoS not explicitly declared (defaults used) → ROS2 Rule 4.
     # verify needed S1-3: castling/en-passant heuristic — king/rook movement does not strip castling rights post-move.
     # verify needed S1-4: ``dict_memory`` resets on node restart → restarting stockfish mid-game breaks ``last_move`` inference.
 """
 
 import json
+import os
 
 import rclpy
 from rclpy.node import Node
@@ -34,7 +35,7 @@ from cobot2_interfaces.srv import StockfishMove
 
 
 # ================= [기본 설정: 클래스보다 먼저 정의] =================
-STOCKFISH_PATH = "/usr/games/stockfish"
+STOCKFISH_PATH = os.getenv("STOCKFISH_PATH", "/usr/games/stockfish")
 SERVICE_NAME = "StockfishMove"
 
 DEFAULT_SKILL_LEVEL = 10
