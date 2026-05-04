@@ -26,9 +26,9 @@
        `vision_db.py` 4개의 역할·실행 순서 매핑.
 - [ ] 1-2. ROS2 토픽/액션/서비스 인벤토리 — `ros2 topic/service/action list`로
        실측. `cobot2_interfaces/{action,srv}` 정의와 대조.
-- [ ] 1-3. 외부 의존성 매핑 — Firebase 클라이언트 호출 위치, OpenAI API 호출 위치,
-       YOLO 모델 로드 위치(`models/`), Stockfish 바이너리 호출, 음성 인식
-       (`run_voice.sh`) 진입점.
+- [ ] 1-3. 외부 의존성 매핑 — Firebase 클라이언트 호출 위치, ~~OpenAI API 호출 위치~~,
+       YOLO 모델 로드 위치(`models/`), Stockfish 바이너리 호출, ~~음성 인식
+       (`run_voice.sh`) 진입점~~ (OpenAI/voice stack REMOVED 2026-05-04).
 - [ ] 1-4. 설정 파일 인벤토리 — `config/*.json`, `cobot2/data.json` 각 키의 용도와
        참조 위치 (확인 안 된 키는 "verify needed" 표기).
 

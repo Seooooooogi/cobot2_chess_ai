@@ -274,7 +274,7 @@ Firebase: chess/board_state set({updated_at, piece_count, board})
 | Rule | 노드 | 비고 |
 |------|------|------|
 | Rule 1 (메시지 의미) | OK | 커스텀 .action/.srv 사용. String 토픽은 voice 명령용 — Phase 1+ Service 전환 검토 |
-| Rule 2 (통신 패턴) | main (voice_command Topic), vision_db (ROS2 부재) | 재설계 필요 |
+| Rule 2 (통신 패턴) | ~~main (voice_command Topic)~~ **RESOLVED 2026-05-04** (`~/start_sampling` Trigger Service 교체), vision_db (ROS2 부재) | vision_db 재설계 필요 |
 | Rule 4 (QoS 명시) | 전 노드 default 사용 | Phase 2+ QoSProfile 명시 |
 | Rule 7 (실패 가시성) | main (Firebase 단절 silent), robot (Modbus 단절 silent) | 페일세이프 정의 필요 |
 | Rule 8 (확장성) | robot (IP 하드코딩), vision (path 하드코딩) | Phase 1+ env 화 |
@@ -284,7 +284,7 @@ Firebase: chess/board_state set({updated_at, piece_count, board})
 
 ## Phase 1 후속 작업 우선순위 (제안)
 
-1. **Phase 1-2** (다음): 토픽/액션/서비스 인벤토리 — `ros2 topic list` 실측, voice_command 흐름 끊기 방안 설계 (M1-6 해소).
+1. **Phase 1-2** (다음): 토픽/액션/서비스 인벤토리 — `ros2 topic list` 실측. ~~voice_command 흐름 끊기 방안 설계 (M1-6 해소)~~ **RESOLVED 2026-05-04** (Service 전환 완료).
 2. **Phase 1-3**: 외부 의존성 매핑 (Firebase, YOLO, Stockfish, DR_init) — 하드코딩 일괄 정리 가능 여부.
 3. **Phase 1-4**: `data.json`, `config/*.json` 인벤토리.
 4. **Phase 2** (식별된 우선 이슈):
