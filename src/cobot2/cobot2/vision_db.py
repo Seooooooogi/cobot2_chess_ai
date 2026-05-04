@@ -15,10 +15,10 @@ from firebase_admin import credentials, db
 
 
 # ================= [사용자 설정 구역] =================
-YOLO_PATH = "/home/kyb/cobot_ws/src/cobot2/cobot2/train_pt/best.pt"
-RESNET_PATH = "/home/kyb/cobot_ws/src/cobot2/cobot2/train_pt/classifier.pt"
-GRID_PATH = "/home/kyb/cobot_ws/src/cobot2/config/chess_grid.json"
-SOURCE = 3
+YOLO_PATH = os.getenv("YOLO_MODEL_PATH")
+RESNET_PATH = os.getenv("RESNET_MODEL_PATH")
+GRID_PATH = os.getenv("CHESS_GRID_PATH")
+SOURCE = int(os.getenv("CAMERA_SOURCE", "3"))
 
 SAVE_DIR = "./captured_boards"
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -28,7 +28,7 @@ CLASS_ABBR = {"Pawn": "P", "Rook": "R", "Knight": "N", "Bishop": "B", "Queen": "
 
 # ===== Firebase 설정 (env 주입) =====
 FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
-FIREBASE_DB_URL = "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app"
+FIREBASE_DB_URL = os.getenv("FIREBASE_DATABASE_URL", "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app")
 FIREBASE_DB_PATH = "chess/board_state"
 
 # ===== 동작 옵션 =====
