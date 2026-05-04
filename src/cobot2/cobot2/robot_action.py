@@ -283,8 +283,6 @@ class RobotActionServer(Node):
         self.get_logger().info("Executing goal...")
         
         result = MoveChessPiece.Result()
-        feedback_msg = MoveChessPiece.Feedback()
-        
         try:
             # goal_handle을 통째로 넘겨줍니다.
             self.chess_mover.perform_task(goal_handle)
