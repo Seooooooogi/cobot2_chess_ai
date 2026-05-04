@@ -1,3 +1,52 @@
+"""RobotActionServer — Doosan M0609 + RG2 motion action server (entry point: ``ros2 run cobot2 robotaction``).
+
+Role:
+    Receives ``MoveChessPiece`` action goals containing a chess move (e.g. ``"e2e4"``) plus the current
+    board dict, and drives the robot through the corresponding pick-and-place sequence (with branches for
+    en-passant and castling).
+
+ROS2 Interfaces:
+    Server: Action ``move_chess_piece`` (cobot2_interfaces/MoveChessPiece) (line 389-396)
+
+    Auxiliary node ``dsr_robot_node`` (namespace=``dsr01``) is constructed at line 437 to host the global
+    references DR_init reads from. **It is not added to the executor** (line 445 only spins
+    ``RobotActionServer``) — # verify needed: whether DR_init can operate without spinning that node.
+
+Hardware & Motion API:
+    - DR_init / DSR_ROBOT2 Python wrapper bound to ``__dsr__id="dsr01"``, ``__dsr__model="m0609"`` (line 438-440).
+    - Motion calls are direct DSR API (``movej``, ``movel``, ``mwait``, ``wait``) — **not** ROS2 service calls
+      against ``/dsr01/dsr_controller2``. This is why ``/dsr01/servoj_stream`` etc. observed zero publishers
+      in Phase 1-2 capture.
+    - RG2 gripper via OnRobot Modbus TCP at ``192.168.1.1:502`` (line 75-76, hardcoded).
+    - Tool: TCP ``GripperDA_v1_1``, weight ``Tool Weight`` (line 68-69).
+
+Mode Selection:
+    - ``ROBOT_MODE`` env var (default ``"virtual"``, line 80). Must match the DSR launch ``mode:=`` arg —
+      mismatch is a Rule 9 safety risk (warned at line 401-404).
+    - In ``virtual`` mode, ``MovingChessPiece._init_gripper`` skips the Modbus connect (line 137-139).
+    - In ``real`` mode, the connect is attempted lazily and ``is_socket_open()`` is checked to fail loudly
+      (Rule 7) instead of pymodbus 2.x's silent connect failure (line 148-153).
+
+External Dependencies:
+    - DR_init / DSR_ROBOT2 (vendored doosan-robot2)
+    - ``cobot2.onrobot.RG`` wrapping pymodbus
+    - ``data.json`` (alongside this file) for motion parameters and chess-board coordinates
+      (``JSON_PATH`` line 71, loaded by ``MovingChessPiece.load_initial_config``)
+    - ``cobot2_interfaces.action.MoveChessPiece``
+
+Issues (Phase 1-1 doc Node 3):
+    - RESOLVED R1-1: module-level ``gripper = RG(...)`` removed (2026-05-01) — moved into
+      ``MovingChessPiece._init_gripper`` with ``ROBOT_MODE`` branch + ``is_socket_open()`` guard.
+    - IMPORTANT R1-2: ``goal_callback`` (line 406) accepts unconditionally — no command validation → Rule 7.
+    - IMPORTANT R1-3: ``TOOLCHARGER_IP/PORT`` hardcoded → Rule 8 (should be a node parameter).
+    - IMPORTANT R1-4: no E-stop / failsafe path on Modbus disconnect → Rule 9.
+    - IMPORTANT R1-5: action server QoS not declared → Rule 4.
+    # verify needed (Phase 1-1 line 156): ``dsr_robot_node`` is not added to the executor — does DR_init
+        function correctly when its bound node is never spun?
+    # verify needed R1-7: ``data.json`` Korean keys — coordinate accuracy unverified in virtual mode.
+    - R1-8 RESOLVED 2026-05-01: unused ``feedback_msg`` (``MoveChessPiece.Feedback()``) removed from ``execute_callback``.
+"""
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
@@ -31,6 +80,21 @@ TOOLCHARGER_PORT = "502"
 ROBOT_MODE = os.getenv("ROBOT_MODE", "virtual")
 
 class MovingChessPiece:
+    """Motion logic owner — loads config, pre-computes board coordinates, executes pick-and-place.
+
+    Construction sequence:
+        1. Stores ``logger_node`` for ``log()``.
+        2. Sets default motion params (vel/acc/time/wait) and reference poses.
+        3. ``_init_gripper()`` — None in virtual mode, RG2 Modbus client in real mode.
+        4. ``load_initial_config()`` — overrides defaults from ``data.json`` (Korean keys).
+        5. ``calculate()`` — pre-computes ``posx_board_list`` / ``posx_over_list`` /
+           ``posx_under_list`` for all 64 cells from ``posx_A1`` + interval constants.
+
+    Side Effects:
+        - In real mode, ``_init_gripper`` opens a Modbus TCP socket to ``192.168.1.1:502``.
+        - In virtual mode, no hardware contact.
+    """
+
     def __init__(self, logger_node: Node):
         self.logger_node = logger_node
 
@@ -57,6 +121,19 @@ class MovingChessPiece:
         self.calculate()
 
     def _init_gripper(self):
+        """Initialize the RG2 gripper based on ``ROBOT_MODE``.
+
+        Returns:
+            ``RG`` instance in real mode, ``None`` in virtual mode.
+
+        Raises:
+            RuntimeError — if real mode and ``rg.client.is_socket_open()`` is False
+            (pymodbus 2.x silently swallows connect failures, so this guard fails loudly per Rule 7).
+
+        Side Effects:
+            Real mode only: opens a Modbus TCP socket to ``TOOLCHARGER_IP:TOOLCHARGER_PORT``
+            (``192.168.1.1:502``).
+        """
         if ROBOT_MODE == "virtual":
             self.log("[VIRTUAL] Skipping RG2 Modbus connect")
             return None
@@ -82,6 +159,20 @@ class MovingChessPiece:
         self.logger_node.get_logger().info(full)
     
     def load_initial_config(self):
+        """Override motion defaults from ``data.json`` (alongside this module).
+
+        Reads all 14 keys in the file — Korean motion params plus cell-interval keys (Phase 4 2026-05-01):
+            ``속도``, ``가속도``, ``시간``, ``mwait_시간``, ``wait_시간``, ``홈_관절좌표``,
+            ``A1_좌표``, ``무덤_관절좌표``, ``무덤_관절좌표_오버``, ``z축_간격``,
+            ``posnumx_interval``, ``poschary_interval``, ``posnumy_interval``, ``poscharx_interval``.
+
+        Side Effects:
+            Updates instance attributes in place. If the file does not exist or fails to parse,
+            the constructor's defaults remain.
+
+        Notes:
+            # verify needed R1-7: data.json Korean-keyed coordinates have not been verified in virtual mode.
+        """
         if not os.path.exists(JSON_PATH):
             return
         try:
@@ -146,6 +237,32 @@ class MovingChessPiece:
                 self.posx_under_list[f"{characters[c]}{j+1}"] = posx_under
                 
     def perform_task(self, goal_handle):
+        """Execute the pick-and-place sequence for one chess move.
+
+        Args:
+            goal_handle: rclpy ActionServer goal handle. ``goal_handle.request`` carries
+                ``command`` (UCI move, e.g. ``"e2e4"``) and ``pieces_dict`` (JSON-serialized
+                ``A1``..``H8`` → ``WP``/``BR``/... map).
+
+        Branches inside the function:
+            - Pawn diagonal into empty cell (``piece_from[1] == 'P'`` and column changes and target is None)
+              → en-passant: lift captured pawn, deposit at ``posj_tomb``, return.
+            - King two-column move (``piece_from[1] == 'K'`` and column delta == 2)
+              → castling: relocate corresponding rook before moving the king.
+            - ``target is not None`` → pre-capture: lift target piece to ``posj_tomb`` first.
+            - Then move the moving piece from ``from_pos`` to ``to_pos``.
+
+        Motion API:
+            Imports ``movej``, ``movel``, ``mwait``, ``wait`` from ``DSR_ROBOT2`` directly.
+            **Not** ROS2 service calls.
+
+        Side Effects:
+            - Issues motion commands through DR_init / DSR_ROBOT2 to the M0609 controller.
+            - Opens / closes the RG2 gripper (no-op in virtual mode).
+
+        Notes:
+            R1-8 RESOLVED 2026-05-01: unused ``Feedback`` instance removed from ``execute_callback``.
+        """
         command = goal_handle.request.command
         pieces_dict = json.loads(goal_handle.request.pieces_dict)
         from_pos = command[0:2].upper()
@@ -247,6 +364,21 @@ class MovingChessPiece:
 
 
 class RobotActionServer(Node):
+    """ROS2 action server hosting ``move_chess_piece``.
+
+    Construction sequence:
+        1. Instantiates ``MovingChessPiece`` (which loads ``data.json`` and pre-computes
+           the 64-cell coordinate tables; in real mode also opens the Modbus connection).
+        2. Creates ``ActionServer`` with ``goal_callback`` / ``cancel_callback`` / ``execute_callback``.
+        3. Logs ``ROBOT_MODE`` with a Rule 9 mismatch warning.
+
+    Notes:
+        - ``goal_callback`` accepts unconditionally — IMPORTANT R1-2 (no command validation).
+        - The auxiliary node ``dsr_robot_node`` constructed in ``main()`` (line 437) is bound to
+          ``DR_init.__dsr__node`` but **not** added to the executor at line 445 — only this node
+          (``RobotActionServer``) is spun. # verify needed (Phase 1-1 line 156).
+    """
+
     def __init__(self):
         super().__init__('robot_action_server')
         
