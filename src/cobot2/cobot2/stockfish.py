@@ -1,3 +1,28 @@
+"""AIMoveServiceNode — Stockfish engine wrapper service (entry point: ``ros2 run cobot2 stockfish``).
+
+Role:
+    Exposes a ROS2 service that takes a chess board dict (``A1``..``H8`` → piece codes ``WP``/``BR``/...),
+    converts it to FEN, and returns Stockfish's best move.
+
+ROS2 Interfaces:
+    Server: Service ``StockfishMove`` (cobot2_interfaces/StockfishMove) (line 71)
+
+Internal State:
+    - ``self.stockfish``  — ``Stockfish(path=STOCKFISH_PATH)`` instance, or ``None`` if engine binary missing (line 64-67).
+    - ``self.dict_memory`` — last board dict used to infer ``last_move`` for en-passant heuristics (line 69; ``dict_to_fen`` line 114-129).
+
+External Dependencies:
+    - Stockfish binary at ``/usr/games/stockfish`` (module constant ``STOCKFISH_PATH``, line 37)
+    - ``stockfish`` PyPI library
+    - ``cobot2_interfaces.srv.StockfishMove``
+
+Issues (Phase 1-1 doc Node 2):
+    - IMPORTANT S1-1: ``STOCKFISH_PATH`` is a module constant — Phase 4: env-ize.
+    - MINOR     S1-2: Service QoS not explicitly declared (defaults used) → ROS2 Rule 4.
+    # verify needed S1-3: castling/en-passant heuristic — king/rook movement does not strip castling rights post-move.
+    # verify needed S1-4: ``dict_memory`` resets on node restart → restarting stockfish mid-game breaks ``last_move`` inference.
+"""
+
 import json
 
 import rclpy
@@ -19,6 +44,19 @@ DEFAULT_TURN = "w"
 
 
 class AIMoveServiceNode(Node):
+    """ROS2 node hosting the ``StockfishMove`` service.
+
+    Side Effects on construction:
+        - Attempts to instantiate ``Stockfish(path=STOCKFISH_PATH)``; on failure stores ``None``
+          and logs an error. Each request re-checks for ``None``.
+        - Initializes ``self.dict_memory = {}`` (used by ``dict_to_fen`` to infer ``last_move``).
+
+    Notes:
+        # verify needed S1-4: ``dict_memory`` does not persist across node restarts. Restarting
+        the stockfish node mid-game causes the next FEN to be generated without the prior
+        board snapshot, so en-passant inference falls back to ``"-"``.
+    """
+
     def __init__(self):
         super().__init__("chess_ai_node")
 
@@ -34,6 +72,26 @@ class AIMoveServiceNode(Node):
         self.get_logger().info(f"Stockfish service ready: {SERVICE_NAME}")
 
     def dict_to_fen(self, pieces_dict, turn):
+        """Convert a board dict to a FEN string.
+
+        Args:
+            pieces_dict: dict[str, str] — keys ``"A1"``..``"H8"``, values ``"WP"``/``"BR"``/etc.
+            turn:        ``"w"`` or ``"b"``.
+
+        Returns:
+            str — FEN with the form ``"<placement> <turn> <castling> <ep> 0 1"``.
+
+        Side Effects:
+            None (reads ``self.dict_memory`` but does not modify it here).
+
+        Notes:
+            # verify needed S1-3: castling rights are derived only from current piece positions
+            (king on E1/E8 + rook on A/H corners). Does not track whether king/rook moved earlier
+            in the game and lost the right despite returning to those squares.
+            # verify needed S1-3: en-passant square is inferred from ``self.dict_memory``-derived
+            ``last_move`` (single-removal/single-addition diff) — multi-piece changes (capture +
+            pawn double-step in same turn) yield ``last_move = None``.
+        """
         last_move = None
         board = [["" for _ in range(8)] for _ in range(8)]
 
@@ -118,6 +176,24 @@ class AIMoveServiceNode(Node):
         return fen
 
     def get_updated_dict(self, pieces_dict, move):
+        """Apply a chess move to a board dict (used to update ``self.dict_memory``).
+
+        Args:
+            pieces_dict: dict[str, str] — current board.
+            move:        UCI-style move string, e.g. ``"e2e4"`` or ``"e7e8q"`` (promotion suffix is ignored
+                         here — only ``move[0:4]`` is consumed).
+
+        Returns:
+            dict[str, str] — updated board (input dict is copied, not mutated).
+
+        Side Effects:
+            None.
+
+        Notes:
+            Branches: pawn diagonal move into empty square → en-passant capture (removes the captured
+            pawn at ``to_pos[0] + from_pos[1]``); king two-square move → castling (relocates rook
+            from ``A``/``H`` to ``D``/``F``).
+        """
         from_pos = move[0:2].upper()
         to_pos = move[2:4].upper()
 
