@@ -14,6 +14,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.json')),
         (os.path.join('share', package_name, 'models'), glob('models/*')),
+        (os.path.join('share', package_name, 'train_pt'), glob('cobot2/train_pt/*.pt')),
         (os.path.join('share', package_name), ['.env', 'cobot2/data.json']),
         ],
     install_requires=['setuptools'],
