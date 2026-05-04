@@ -6,14 +6,14 @@ Role:
     en-passant and castling).
 
 ROS2 Interfaces:
-    Server: Action ``move_chess_piece`` (cobot2_interfaces/MoveChessPiece) (line 390-403)
+    Server: Action ``move_chess_piece`` (cobot2_interfaces/MoveChessPiece) (line 402-414)
 
-    Auxiliary node ``dsr_robot_node`` (namespace=``dsr01``) is constructed at line 443 to host the global
-    references DR_init reads from. **It is not added to the executor** (line 454 only spins
+    Auxiliary node ``dsr_robot_node`` (namespace=``dsr01``) is constructed at line 552 to host the global
+    references DR_init reads from. **It is not added to the executor** (line 563 only spins
     ``RobotActionServer``) — # verify needed: whether DR_init can operate without spinning that node.
 
 Hardware & Motion API:
-    - DR_init / DSR_ROBOT2 Python wrapper bound to ``__dsr__id="dsr01"``, ``__dsr__model="m0609"`` (line 444-446).
+    - DR_init / DSR_ROBOT2 Python wrapper bound to ``__dsr__id="dsr01"``, ``__dsr__model="m0609"`` (line 553-555).
     - Motion calls are direct DSR API (``movej``, ``movel``, ``mwait``, ``wait``) — **not** ROS2 service calls
       against ``/dsr01/dsr_controller2``. This is why ``/dsr01/servoj_stream`` etc. observed zero publishers
       in Phase 1-2 capture.
@@ -22,7 +22,7 @@ Hardware & Motion API:
 
 Mode Selection:
     - ``ROBOT_MODE`` env var (default ``"virtual"``, line 80). Must match the DSR launch ``mode:=`` arg —
-      mismatch is a Rule 9 safety risk (warned at line 407-410).
+      mismatch is a Rule 9 safety risk (warned at line 419-422).
     - In ``virtual`` mode, ``MovingChessPiece._init_gripper`` skips the Modbus connect (line 138-140).
     - In ``real`` mode, the connect is attempted lazily and ``is_socket_open()`` is checked to fail loudly
       (Rule 7) instead of pymodbus 2.x's silent connect failure (line 149-154).
@@ -37,7 +37,7 @@ External Dependencies:
 Issues (Phase 1-1 doc Node 3):
     - RESOLVED R1-1: module-level ``gripper = RG(...)`` removed (2026-05-01) — moved into
       ``MovingChessPiece._init_gripper`` with ``ROBOT_MODE`` branch + ``is_socket_open()`` guard.
-    - IMPORTANT R1-2: ``goal_callback`` (line 412) accepts unconditionally — no command validation → Rule 7.
+    - ~~IMPORTANT R1-2: ``goal_callback`` accepts unconditionally — no command validation → Rule 7.~~ **RESOLVED 2026-05-04**: ``_validate_goal`` (line 428) implements V1-V13 (UCI 형식, pieces_dict 무결성, from_pos 피스 존재·코드, 동시성). HARD REJECT 시 robot/gripper 미동작 보장 (Rule 9 모션 전 차단).
     - IMPORTANT R1-3: ``TOOLCHARGER_IP/PORT`` hardcoded → Rule 8 (should be a node parameter).
     - IMPORTANT R1-4: no E-stop / failsafe path on Modbus disconnect → Rule 9.
     - ~~IMPORTANT R1-5: action server QoS not declared → Rule 4.~~ **RESOLVED 2026-05-04**: 5종 QoS 명시 (goal/result/cancel/feedback = ``qos_profile_services_default``, status = ``qos_profile_action_status_default``).
@@ -59,6 +59,7 @@ from .onrobot import RG
 
 import json
 import os
+import threading
 
 from datetime import datetime
 
@@ -79,6 +80,15 @@ TOOLCHARGER_PORT = "502"
 # CLAUDE.md Tier 0: virtual mode first. Default virtual for safety —
 # forgetting to set ROBOT_MODE never silently activates hardware.
 ROBOT_MODE = os.getenv("ROBOT_MODE", "virtual")
+
+# R1-2 goal_callback validation (Rule 7+9 defense-in-depth).
+# Source: stockfish.py piece_match dict (12 entries).
+VALID_PIECES = frozenset({"WP", "WR", "WN", "WB", "WQ", "WK",
+                          "BP", "BR", "BN", "BB", "BQ", "BK"})
+VALID_FILES = frozenset("ABCDEFGH")
+VALID_RANKS = frozenset("12345678")
+VALID_PROMOTIONS = frozenset("qrbn")
+
 
 class MovingChessPiece:
     """Motion logic owner — loads config, pre-computes board coordinates, executes pick-and-place.
@@ -374,9 +384,11 @@ class RobotActionServer(Node):
         3. Logs ``ROBOT_MODE`` with a Rule 9 mismatch warning.
 
     Notes:
-        - ``goal_callback`` accepts unconditionally — IMPORTANT R1-2 (no command validation).
-        - The auxiliary node ``dsr_robot_node`` constructed in ``main()`` (line 443) is bound to
-          ``DR_init.__dsr__node`` but **not** added to the executor at line 454 — only this node
+        - ``goal_callback`` validates via ``_validate_goal`` (R1-2 RESOLVED 2026-05-04).
+        - ``execute_callback`` toggles ``self._is_executing`` under ``self._execution_lock``
+          to enable V12 (concurrent-goal REJECT in ``_validate_goal``).
+        - The auxiliary node ``dsr_robot_node`` constructed in ``main()`` (line 552) is bound to
+          ``DR_init.__dsr__node`` but **not** added to the executor at line 563 — only this node
           (``RobotActionServer``) is spun. # verify needed (Phase 1-1 line 156).
     """
 
@@ -409,10 +421,101 @@ class RobotActionServer(Node):
             "(arm/gripper mode mismatch is a Rule 9 safety risk)"
         )
 
+        # R1-2 V12: 동시 실행 추적. _is_executing 은 _execution_lock 으로 보호.
+        self._execution_lock = threading.Lock()
+        self._is_executing = False
+
+    def _validate_goal(self, goal_request) -> tuple[bool, str]:
+        """Validate MoveChessPiece goal before accepting (R1-2 / Rule 7+9).
+
+        Returns (is_valid, reason). Reason starts with ``V<N>:`` matching
+        the rule index in the design doc. Caller (``goal_callback``) decides
+        log severity based on prefix.
+        """
+        cmd = goal_request.command
+
+        # V1: command type and length
+        if not isinstance(cmd, str) or len(cmd) not in (4, 5):
+            cmd_len = len(cmd) if isinstance(cmd, str) else "N/A"
+            return False, f"V1: command must be str of length 4 or 5, got {type(cmd).__name__} len={cmd_len}"
+
+        cmd_upper = cmd.upper()
+        from_sq = cmd_upper[0:2]
+        to_sq = cmd_upper[2:4]
+
+        # V2-V3: from-square format
+        if from_sq[0] not in VALID_FILES:
+            return False, f"V2: from-file '{cmd[0]}' not in a-h"
+        if from_sq[1] not in VALID_RANKS:
+            return False, f"V3: from-rank '{cmd[1]}' not in 1-8"
+
+        # V4-V5: to-square format
+        if to_sq[0] not in VALID_FILES:
+            return False, f"V4: to-file '{cmd[2]}' not in a-h"
+        if to_sq[1] not in VALID_RANKS:
+            return False, f"V5: to-rank '{cmd[3]}' not in 1-8"
+
+        # V6: promotion piece char (only checked if length 5)
+        if len(cmd) == 5 and cmd[4].lower() not in VALID_PROMOTIONS:
+            return False, f"V6: promotion piece '{cmd[4]}' not in qrbn"
+
+        # V7: from != to
+        if from_sq == to_sq:
+            return False, f"V7: from == to ({from_sq})"
+
+        # V13: 5-char UCI HARD REJECT (OQ-1=A: execute_callback consumes [0:4] only,
+        # promotion not yet supported → board dict desync risk if accepted).
+        if len(cmd) == 5:
+            return False, f"V13: promotion moves not supported by execute_callback (consumes [0:4] only)"
+
+        # V8: pieces_dict JSON parse
+        try:
+            d = json.loads(goal_request.pieces_dict)
+        except (json.JSONDecodeError, TypeError) as e:
+            return False, f"V8: pieces_dict JSON parse failed: {e}"
+
+        # V9: dict and non-empty
+        if not isinstance(d, dict) or not d:
+            return False, f"V9: pieces_dict must be non-empty dict, got {type(d).__name__}"
+
+        # V10: from_sq has piece (Rule 9: block before homing motion at execute_callback line 285)
+        piece = d.get(from_sq)
+        if piece is None:
+            return False, f"V10: source square {from_sq} is empty in pieces_dict"
+
+        # V11: from-piece is valid code
+        if piece not in VALID_PIECES:
+            return False, f"V11: unknown piece code '{piece}' at {from_sq}"
+
+        # V11 (extended, OQ-3=A): to-piece if non-None must also be valid
+        target = d.get(to_sq)
+        if target is not None and target not in VALID_PIECES:
+            return False, f"V11: unknown piece code '{target}' at {to_sq}"
+
+        # V12: concurrent goal check (lock-protected)
+        with self._execution_lock:
+            if self._is_executing:
+                return False, "V12: concurrent goal in progress (previous execute_callback not done)"
+
+        return True, ""
+
     def goal_callback(self, goal_request):
-        """액션 목표 수락 여부 결정"""
-        self.get_logger().info(f"Received goal request: {goal_request.command}")
-        # 간단한 유효성 검사 (예: 문자열 길이 등)를 추가할 수 있습니다.
+        """액션 목표 수락 여부 결정 (R1-2 RESOLVED — _validate_goal V1-V13).
+
+        REJECT 시 robot/gripper 미동작 (Rule 9: 모션 전 차단).
+        V12 (concurrent) → WARN, 그 외 → ERROR.
+        """
+        is_valid, reason = self._validate_goal(goal_request)
+        if not is_valid:
+            cmd_repr = repr(goal_request.command)
+            log = self.get_logger()
+            if reason.startswith("V12:"):
+                log.warn(f"Goal REJECTED [{reason}]. command={cmd_repr}")
+            else:
+                log.error(f"Goal REJECTED [{reason}]. command={cmd_repr}")
+            return GoalResponse.REJECT
+
+        self.get_logger().info(f"Goal ACCEPTED: command={goal_request.command!r}")
         return GoalResponse.ACCEPT
 
     def cancel_callback(self, goal_handle):
@@ -421,21 +524,27 @@ class RobotActionServer(Node):
         return CancelResponse.ACCEPT
 
     async def execute_callback(self, goal_handle):
-        """실제 로봇 동작 수행"""
+        """실제 로봇 동작 수행 (V12 enabling: _is_executing set/clear)."""
+        with self._execution_lock:
+            self._is_executing = True
+
         self.get_logger().info("Executing goal...")
-        
+
         result = MoveChessPiece.Result()
         try:
             # goal_handle을 통째로 넘겨줍니다.
             self.chess_mover.perform_task(goal_handle)
-            
+
             goal_handle.succeed()
             result.success = True
         except Exception as e:
             self.get_logger().error(f"Task failed: {e}")
             goal_handle.abort()
             result.success = False
-        
+        finally:
+            with self._execution_lock:
+                self._is_executing = False
+
         return result
 
 def main(args=None):
