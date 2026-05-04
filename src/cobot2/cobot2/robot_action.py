@@ -6,26 +6,26 @@ Role:
     en-passant and castling).
 
 ROS2 Interfaces:
-    Server: Action ``move_chess_piece`` (cobot2_interfaces/MoveChessPiece) (line 389-396)
+    Server: Action ``move_chess_piece`` (cobot2_interfaces/MoveChessPiece) (line 390-403)
 
-    Auxiliary node ``dsr_robot_node`` (namespace=``dsr01``) is constructed at line 437 to host the global
-    references DR_init reads from. **It is not added to the executor** (line 445 only spins
+    Auxiliary node ``dsr_robot_node`` (namespace=``dsr01``) is constructed at line 443 to host the global
+    references DR_init reads from. **It is not added to the executor** (line 454 only spins
     ``RobotActionServer``) — # verify needed: whether DR_init can operate without spinning that node.
 
 Hardware & Motion API:
-    - DR_init / DSR_ROBOT2 Python wrapper bound to ``__dsr__id="dsr01"``, ``__dsr__model="m0609"`` (line 438-440).
+    - DR_init / DSR_ROBOT2 Python wrapper bound to ``__dsr__id="dsr01"``, ``__dsr__model="m0609"`` (line 444-446).
     - Motion calls are direct DSR API (``movej``, ``movel``, ``mwait``, ``wait``) — **not** ROS2 service calls
       against ``/dsr01/dsr_controller2``. This is why ``/dsr01/servoj_stream`` etc. observed zero publishers
       in Phase 1-2 capture.
     - RG2 gripper via OnRobot Modbus TCP at ``192.168.1.1:502`` (line 75-76, hardcoded).
-    - Tool: TCP ``GripperDA_v1_1``, weight ``Tool Weight`` (line 68-69).
+    - Tool: TCP ``GripperDA_v1_1``, weight ``Tool Weight`` (line 69-70).
 
 Mode Selection:
     - ``ROBOT_MODE`` env var (default ``"virtual"``, line 80). Must match the DSR launch ``mode:=`` arg —
-      mismatch is a Rule 9 safety risk (warned at line 401-404).
-    - In ``virtual`` mode, ``MovingChessPiece._init_gripper`` skips the Modbus connect (line 137-139).
+      mismatch is a Rule 9 safety risk (warned at line 407-410).
+    - In ``virtual`` mode, ``MovingChessPiece._init_gripper`` skips the Modbus connect (line 138-140).
     - In ``real`` mode, the connect is attempted lazily and ``is_socket_open()`` is checked to fail loudly
-      (Rule 7) instead of pymodbus 2.x's silent connect failure (line 148-153).
+      (Rule 7) instead of pymodbus 2.x's silent connect failure (line 149-154).
 
 External Dependencies:
     - DR_init / DSR_ROBOT2 (vendored doosan-robot2)
@@ -37,10 +37,10 @@ External Dependencies:
 Issues (Phase 1-1 doc Node 3):
     - RESOLVED R1-1: module-level ``gripper = RG(...)`` removed (2026-05-01) — moved into
       ``MovingChessPiece._init_gripper`` with ``ROBOT_MODE`` branch + ``is_socket_open()`` guard.
-    - IMPORTANT R1-2: ``goal_callback`` (line 406) accepts unconditionally — no command validation → Rule 7.
+    - IMPORTANT R1-2: ``goal_callback`` (line 412) accepts unconditionally — no command validation → Rule 7.
     - IMPORTANT R1-3: ``TOOLCHARGER_IP/PORT`` hardcoded → Rule 8 (should be a node parameter).
     - IMPORTANT R1-4: no E-stop / failsafe path on Modbus disconnect → Rule 9.
-    - IMPORTANT R1-5: action server QoS not declared → Rule 4.
+    - ~~IMPORTANT R1-5: action server QoS not declared → Rule 4.~~ **RESOLVED 2026-05-04**: 5종 QoS 명시 (goal/result/cancel/feedback = ``qos_profile_services_default``, status = ``qos_profile_action_status_default``).
     # verify needed (Phase 1-1 line 156): ``dsr_robot_node`` is not added to the executor — does DR_init
         function correctly when its bound node is never spun?
     # verify needed R1-7: ``data.json`` Korean keys — coordinate accuracy unverified in virtual mode.
@@ -51,6 +51,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import qos_profile_services_default, qos_profile_action_status_default
 
 import DR_init
 import time
@@ -374,8 +375,8 @@ class RobotActionServer(Node):
 
     Notes:
         - ``goal_callback`` accepts unconditionally — IMPORTANT R1-2 (no command validation).
-        - The auxiliary node ``dsr_robot_node`` constructed in ``main()`` (line 437) is bound to
-          ``DR_init.__dsr__node`` but **not** added to the executor at line 445 — only this node
+        - The auxiliary node ``dsr_robot_node`` constructed in ``main()`` (line 443) is bound to
+          ``DR_init.__dsr__node`` but **not** added to the executor at line 454 — only this node
           (``RobotActionServer``) is spun. # verify needed (Phase 1-1 line 156).
     """
 
@@ -385,14 +386,19 @@ class RobotActionServer(Node):
         # 로직 클래스 초기화
         self.chess_mover = MovingChessPiece(self)
         
-        # 액션 서버 설정
+        # 액션 서버 설정 (Rule 4: QoS 명시 — rclpy 기본값과 동일하나 의도 명시)
         self._action_server = ActionServer(
             self,
             MoveChessPiece,
             'move_chess_piece',
             execute_callback=self.execute_callback,
             goal_callback=self.goal_callback,
-            cancel_callback=self.cancel_callback
+            cancel_callback=self.cancel_callback,
+            goal_service_qos_profile=qos_profile_services_default,
+            result_service_qos_profile=qos_profile_services_default,
+            cancel_service_qos_profile=qos_profile_services_default,
+            feedback_pub_qos_profile=qos_profile_services_default,
+            status_pub_qos_profile=qos_profile_action_status_default,
         )
         self.get_logger().info(
             f"Robot Action Server started for {ROBOT_ID} ({ROBOT_MODEL}, "
