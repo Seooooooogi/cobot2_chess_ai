@@ -5,7 +5,7 @@ Role:
     converts it to FEN, and returns Stockfish's best move.
 
 ROS2 Interfaces:
-    Server: Service ``StockfishMove`` (cobot2_interfaces/StockfishMove) (line 71)
+    Server: Service ``StockfishMove`` (cobot2_interfaces/StockfishMove) (line 73)
 
 Internal State:
     - ``self.stockfish``  — ``Stockfish(path=STOCKFISH_PATH)`` instance, or ``None`` if engine binary missing (line 64-67).
@@ -18,7 +18,7 @@ External Dependencies:
 
 Issues (Phase 1-1 doc Node 2):
     - ~~IMPORTANT S1-1: ``STOCKFISH_PATH`` is a module constant — Phase 4: env-ize.~~ **RESOLVED 2026-05-04**: ``os.getenv("STOCKFISH_PATH", ...)``.
-    - MINOR     S1-2: Service QoS not explicitly declared (defaults used) → ROS2 Rule 4.
+    - ~~MINOR S1-2: Service QoS not explicitly declared (defaults used) → ROS2 Rule 4.~~ **RESOLVED 2026-05-04**: ``qos_profile=qos_profile_services_default`` 명시.
     # verify needed S1-3: castling/en-passant heuristic — king/rook movement does not strip castling rights post-move.
     # verify needed S1-4: ``dict_memory`` resets on node restart → restarting stockfish mid-game breaks ``last_move`` inference.
 """
@@ -28,6 +28,7 @@ import os
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_services_default
 
 from stockfish import Stockfish
 
@@ -69,7 +70,12 @@ class AIMoveServiceNode(Node):
 
         self.dict_memory = {}
 
-        self.srv = self.create_service(StockfishMove, SERVICE_NAME, self.get_best_move_callback)
+        self.srv = self.create_service(
+            StockfishMove,
+            SERVICE_NAME,
+            self.get_best_move_callback,
+            qos_profile=qos_profile_services_default,
+        )
         self.get_logger().info(f"Stockfish service ready: {SERVICE_NAME}")
 
     def dict_to_fen(self, pieces_dict, turn):
