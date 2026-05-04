@@ -50,7 +50,16 @@ outputs/
 
 # Claude Code (user-local state)
 .claude/settings.local.json
+.claude/memory/
+
+# Session lessons (user-local, evolves per session)
+tasks/lessons.md
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Vendored ROS2 packages (not tracked — install via README git clone)
+src/doosan-robot2/
+src/onrobot-ros2/
+src/m0609_rg2_bringup/
