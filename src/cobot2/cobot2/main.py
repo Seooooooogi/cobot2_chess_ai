@@ -64,6 +64,7 @@ SAMPLE_INTERVAL_SEC = 1.0
 
 STOCKFISH_SERVICE_NAME = "StockfishMove"
 SERVICE_TIMEOUT_SEC = 20.0
+RESET_CHESS_STATE_SERVICE_NAME = "reset_chess_state"
 
 ROBOT_ACTION_NAME = "move_chess_piece"
 ROBOT_ACTION_SEND_TIMEOUT_SEC = 10.0
@@ -236,6 +237,11 @@ class MainController(Node):
             STOCKFISH_SERVICE_NAME,
             qos_profile=qos_profile_services_default,
         )
+        self.reset_client = self.create_client(
+            Trigger,
+            RESET_CHESS_STATE_SERVICE_NAME,
+            qos_profile=qos_profile_services_default,
+        )
         self.robot_action_client = ActionClient(
             self,
             MoveChessPiece,
@@ -276,6 +282,11 @@ class MainController(Node):
             })
         except Exception as e:
             self.get_logger().warn(f"UI reset failed: {e}")
+
+        if self.reset_client.wait_for_service(timeout_sec=2.0):
+            self.reset_client.call_async(Trigger.Request())
+        else:
+            self.get_logger().warn("reset_chess_state service unavailable; skipping chess state reset.")
 
     def _on_start_sampling(
         self, request: Trigger.Request, response: Trigger.Response

@@ -19,8 +19,8 @@ External Dependencies:
 Issues (Phase 1-1 doc Node 2):
     - ~~IMPORTANT S1-1: ``STOCKFISH_PATH`` is a module constant — Phase 4: env-ize.~~ **RESOLVED 2026-05-04**: ``os.getenv("STOCKFISH_PATH", ...)``.
     - ~~MINOR S1-2: Service QoS not explicitly declared (defaults used) → ROS2 Rule 4.~~ **RESOLVED 2026-05-04**: ``qos_profile=qos_profile_services_default`` 명시.
-    # verify needed S1-3: castling/en-passant heuristic — king/rook movement does not strip castling rights post-move.
-    # verify needed S1-4: ``dict_memory`` resets on node restart → restarting stockfish mid-game breaks ``last_move`` inference.
+    # S1-3 RESOLVED 2026-05-05: castling rights now tracked via ``self.castling_rights`` (persisted to JSON); revoked on king/rook moves.
+    # S1-4 RESOLVED 2026-05-05: ``dict_memory`` persisted to ``CHESS_AI_STATE_PATH`` JSON; loaded on node startup.
 """
 
 import json
@@ -32,12 +32,18 @@ from rclpy.qos import qos_profile_services_default
 
 from stockfish import Stockfish
 
+from std_srvs.srv import Trigger
+
 from cobot2_interfaces.srv import StockfishMove
 
 
 # ================= [기본 설정: 클래스보다 먼저 정의] =================
 STOCKFISH_PATH = os.getenv("STOCKFISH_PATH", "/usr/games/stockfish")
 SERVICE_NAME = "StockfishMove"
+RESET_SERVICE_NAME = "reset_chess_state"
+CHESS_AI_STATE_PATH = os.path.expanduser(
+    os.getenv("CHESS_AI_STATE_PATH", "~/.local/share/cobot2_chess_ai/chess_state.json")
+)
 
 DEFAULT_SKILL_LEVEL = 10
 DEFAULT_DEPTH = 15
@@ -46,17 +52,13 @@ DEFAULT_TURN = "w"
 
 
 class AIMoveServiceNode(Node):
-    """ROS2 node hosting the ``StockfishMove`` service.
+    """ROS2 node hosting the ``StockfishMove`` and ``reset_chess_state`` services.
 
     Side Effects on construction:
         - Attempts to instantiate ``Stockfish(path=STOCKFISH_PATH)``; on failure stores ``None``
           and logs an error. Each request re-checks for ``None``.
-        - Initializes ``self.dict_memory = {}`` (used by ``dict_to_fen`` to infer ``last_move``).
-
-    Notes:
-        # verify needed S1-4: ``dict_memory`` does not persist across node restarts. Restarting
-        the stockfish node mid-game causes the next FEN to be generated without the prior
-        board snapshot, so en-passant inference falls back to ``"-"``.
+        - Calls ``_load_state()`` to restore ``dict_memory`` and ``castling_rights`` from JSON
+          (``CHESS_AI_STATE_PATH``). Defaults to empty dict / ``"KQkq"`` if file absent.
     """
 
     def __init__(self):
@@ -68,12 +70,18 @@ class AIMoveServiceNode(Node):
             self.stockfish = None
             self.get_logger().error(f"Stockfish engine not found: {e}")
 
-        self.dict_memory = {}
+        self._load_state()
 
         self.srv = self.create_service(
             StockfishMove,
             SERVICE_NAME,
             self.get_best_move_callback,
+            qos_profile=qos_profile_services_default,
+        )
+        self.reset_srv = self.create_service(
+            Trigger,
+            RESET_SERVICE_NAME,
+            self.reset_chess_state_callback,
             qos_profile=qos_profile_services_default,
         )
         self.get_logger().info(f"Stockfish service ready: {SERVICE_NAME}")
@@ -92,12 +100,9 @@ class AIMoveServiceNode(Node):
             None (reads ``self.dict_memory`` but does not modify it here).
 
         Notes:
-            # verify needed S1-3: castling rights are derived only from current piece positions
-            (king on E1/E8 + rook on A/H corners). Does not track whether king/rook moved earlier
-            in the game and lost the right despite returning to those squares.
-            # verify needed S1-3: en-passant square is inferred from ``self.dict_memory``-derived
-            ``last_move`` (single-removal/single-addition diff) — multi-piece changes (capture +
-            pawn double-step in same turn) yield ``last_move = None``.
+            Castling rights: uses ``self.castling_rights`` (persisted, revoked on king/rook moves).
+            En-passant: inferred from ``self.dict_memory``-derived ``last_move``
+            (single-removal/single-addition diff) — multi-piece changes yield ``last_move = None``.
         """
         last_move = None
         board = [["" for _ in range(8)] for _ in range(8)]
@@ -156,20 +161,8 @@ class AIMoveServiceNode(Node):
                 row_str += str(empty_count)
             fen_rows.append(row_str)
 
-        # castling rights(간단 추론)
-        rights = ""
-        if pieces_dict.get("E1") == "WK":
-            if pieces_dict.get("H1") == "WR":
-                rights += "K"
-            if pieces_dict.get("A1") == "WR":
-                rights += "Q"
-        if pieces_dict.get("E8") == "BK":
-            if pieces_dict.get("H8") == "BR":
-                rights += "k"
-            if pieces_dict.get("A8") == "BR":
-                rights += "q"
-        if not rights:
-            rights = "-"
+        # castling rights — persisted by _load_state/_save_state; always a non-None string
+        rights = self.castling_rights or "-"
 
         # en-passant (간단 추론)
         ep_square = "-"
@@ -231,6 +224,8 @@ class AIMoveServiceNode(Node):
         return updated_dict
 
     def get_best_move_callback(self, request, response):
+        saved_rights = self.castling_rights  # snapshot for rollback on exception
+        saved_memory = self.dict_memory
         try:
             if self.stockfish is None:
                 raise RuntimeError("Stockfish engine is not initialized")
@@ -240,6 +235,22 @@ class AIMoveServiceNode(Node):
             skill_level = int(request.skill_level) if int(request.skill_level) > 0 else DEFAULT_SKILL_LEVEL
             depth = int(request.depth) if int(request.depth) > 0 else DEFAULT_DEPTH
             turn = request.turn if request.turn in ["w", "b"] else DEFAULT_TURN
+
+            # On first call (empty history): clamp persisted "KQkq" to what the
+            # current position can actually support (prevents invalid FEN when
+            # pieces for a right are absent, e.g. rook already captured/moved).
+            if not self.dict_memory:
+                inferred = ""
+                if pieces_dict.get("E1") == "WK":
+                    if pieces_dict.get("H1") == "WR": inferred += "K"
+                    if pieces_dict.get("A1") == "WR": inferred += "Q"
+                if pieces_dict.get("E8") == "BK":
+                    if pieces_dict.get("H8") == "BR": inferred += "k"
+                    if pieces_dict.get("A8") == "BR": inferred += "q"
+                self.castling_rights = inferred
+
+            # Update castling rights for the human's move (prev board → current board)
+            self._revoke_castling_rights(self.dict_memory, pieces_dict)
 
             self.stockfish.set_skill_level(skill_level)
             self.stockfish.set_depth(depth)
@@ -257,13 +268,82 @@ class AIMoveServiceNode(Node):
             response.success = True if best_move else False
 
             if best_move:
-                self.dict_memory = self.get_updated_dict(pieces_dict, best_move)
+                updated_dict = self.get_updated_dict(pieces_dict, best_move)
+                # Update castling rights for the AI's move (current board → post-AI board)
+                self._revoke_castling_rights(pieces_dict, updated_dict)
+                self.dict_memory = updated_dict
+                self._save_state()  # persist only on complete success
 
         except Exception as e:
             self.get_logger().error(f"Error in AI Calculation: {e}")
             response.success = False
             response.best_move = ""
+            self.castling_rights = saved_rights  # rollback to pre-call state
+            self.dict_memory = saved_memory
 
+        return response
+
+
+    def _load_state(self) -> None:
+        self._state_path = CHESS_AI_STATE_PATH
+        try:
+            with open(self._state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.dict_memory = data.get("dict_memory", {})
+            self.castling_rights = data.get("castling_rights", "KQkq")
+            self.get_logger().info(f"Chess state loaded from {self._state_path}")
+        except FileNotFoundError:
+            self.dict_memory = {}
+            self.castling_rights = "KQkq"
+            self.get_logger().info("No prior chess state file; starting fresh.")
+        except Exception as e:
+            self.dict_memory = {}
+            self.castling_rights = "KQkq"
+            self.get_logger().warn(f"Chess state load failed ({e}); starting fresh.")
+
+    def _save_state(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._state_path), exist_ok=True)
+            data = {
+                "dict_memory": self.dict_memory,
+                "castling_rights": self.castling_rights,
+            }
+            with open(self._state_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            self.get_logger().warn(f"Chess state save failed: {e}")
+
+    def _revoke_castling_rights(self, prev_dict: dict, new_dict: dict) -> None:
+        rights = self.castling_rights or ""
+        if prev_dict.get("E1") == "WK" and new_dict.get("E1") != "WK":
+            rights = rights.replace("K", "").replace("Q", "")
+        if prev_dict.get("H1") == "WR" and new_dict.get("H1") != "WR":
+            rights = rights.replace("K", "")
+        if prev_dict.get("A1") == "WR" and new_dict.get("A1") != "WR":
+            rights = rights.replace("Q", "")
+        if prev_dict.get("E8") == "BK" and new_dict.get("E8") != "BK":
+            rights = rights.replace("k", "").replace("q", "")
+        if prev_dict.get("H8") == "BR" and new_dict.get("H8") != "BR":
+            rights = rights.replace("k", "")
+        if prev_dict.get("A8") == "BR" and new_dict.get("A8") != "BR":
+            rights = rights.replace("q", "")
+        self.castling_rights = rights
+
+    def reset_chess_state_callback(self, request, response):
+        try:
+            self.dict_memory = {}
+            self.castling_rights = "KQkq"
+            try:
+                os.remove(self._state_path)
+            except FileNotFoundError:
+                pass
+            self.get_logger().info("Chess state reset for new game.")
+            response.success = True
+            response.message = "reset ok"
+        except Exception as e:
+            self.get_logger().error(f"Chess state reset failed: {e}")
+            response.success = False
+            response.message = str(e)
         return response
 
 
