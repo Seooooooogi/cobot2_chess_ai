@@ -24,7 +24,7 @@ def generate_launch_description():
         # 1. Stockfish AI Node
         Node(
             package='cobot2',
-            executable='stockfish_node',
+            executable='stockfish',
             name='stockfish_node',
             output='screen',
             respawn=True,
@@ -33,7 +33,7 @@ def generate_launch_description():
         # 2. CV Chess Recognition Node
         Node(
             package='cobot2',
-            executable='cv_chess_recognition_node',
+            executable='object',
             name='cv_chess_recognition_node',
             output='screen',
             respawn=True,
@@ -46,7 +46,7 @@ def generate_launch_description():
         # 3. Robot Control Action Server
         Node(
             package='cobot2',
-            executable='moving_chess_piece_node',
+            executable='robotaction',
             name='moving_chess_piece_node',
             output='screen',
             respawn=True,
@@ -55,7 +55,7 @@ def generate_launch_description():
         # 4. Chess Integration Node (Firebase Listener & Coordinator)
         Node(
             package='cobot2',
-            executable='chess_integration_node',
+            executable='main',
             name='chess_integration_node',
             output='screen',
             respawn=True,
