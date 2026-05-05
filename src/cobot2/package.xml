@@ -7,9 +7,6 @@
   <maintainer email="your_email@example.com">Your Name</maintainer>
   <license>Apache-2.0</license>
 
-  <!-- Build tool dependencies -->
-  <buildtool_depend>ament_python</buildtool_depend>
-
   <!-- Runtime dependencies -->
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
