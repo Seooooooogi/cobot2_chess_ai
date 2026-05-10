@@ -31,21 +31,18 @@ Threads:
       spawned in ``_on_user_decision`` (APPROVED branch).
 
 External Dependencies:
-    - Firebase Realtime DB — read/write ``chess/ui_control`` (sub-phase E에서 일괄 제거).
-      ``chess/board_state`` (D1)와 ``chess/chess_system`` (D3) 경로는 main 측에서 더 이상
-      참조하지 않음.
-    - cobot2_interfaces — ``StockfishMove.srv``, ``MoveChessPiece.action``,
-      ``UIStatus.msg``, ``UserDecision.srv``, ``BoardState.msg``.
+    - cobot2_interfaces — ``StockfishMove.srv``, ``UserDecision.srv``,
+      ``MoveChessPiece.action``, ``BoardState.msg``, ``UIStatus.msg``, ``GameEvent.msg``.
+    - Firebase 의존 0 (sub-phase E 2026-05-10). audit log는 game_logger 노드의
+      SQLite append-only DB (Hard Rule #6).
 
 Issues (Phase 1-1 doc Node 1):
-    - M1-3 RESOLVED 2026-05-01: ``FIREBASE_SERVICE_ACCOUNT_JSON`` env-ized via ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var; ``FIREBASE_DB_URL`` via ``FIREBASE_DATABASE_URL`` env var.
+    - M1-3 RESOLVED 2026-05-01: env-ized (sub-phase E에서 Firebase 의존 자체 제거되어 무효).
     - M1-1 RESOLVED 2026-05-04: ``~/start_sampling`` (Trigger) 로 대체.
-    - ~~M1-2: pub/sub QoS 미명시 (Rule 4)~~ **RESOLVED 2026-05-04**: voice 제거로 pub/sub 0건. service/action endpoint에 ``qos_profile_services_default`` / ``qos_profile_action_status_default`` 명시 (line 234-256).
-    - M1-4 PARTIAL Phase 5 sub-phase D3 2026-05-10: vision→main, main→UI status, UI→main
-      user_decision, UI→stockfish parameter 모두 ROS2로 이전 (``vision/board_state``,
-      ``ui_status``, ``user_decision``, stockfish 노드 ``depth``/``skill_level``/
-      ``default_turn`` parameter). Firebase ``ui_control`` writes는 additive 잔존
-      (sub-phase E에서 일괄 제거 + game_logger 노드 신설).
+    - ~~M1-2: pub/sub QoS 미명시 (Rule 4)~~ **RESOLVED 2026-05-04**: voice 제거로 pub/sub 0건. service/action endpoint에 ``qos_profile_services_default`` / ``qos_profile_action_status_default`` 명시.
+    - M1-4 RESOLVED Phase 5 sub-phase E 2026-05-10: Firebase 의존 0. vision→main,
+      main→UI, UI→main, UI→stockfish 모든 채널이 ROS2 native (board_state, ui_status,
+      user_decision, set_parameters). audit log는 game_logger + SQLite (Hard Rule #6).
     - M1-5 RESOLVED Phase 5 sub-phase D2 2026-05-10: ``_poll_ui_decision`` 0.2s timer
       제거. ``~/user_decision`` Service handler가 즉시 처리. workflow thread 내부
       Future polling (``_call_stockfish``, ``_send_robot_action_and_wait``)은 별도 트랙.
@@ -72,24 +69,17 @@ from rclpy.qos import (
 )
 from std_srvs.srv import Trigger
 
-import firebase_admin
-from firebase_admin import credentials, db
-
-from cobot2_interfaces.msg import BoardState, UIStatus
+from cobot2_interfaces.msg import BoardState, GameEvent, UIStatus
 from cobot2_interfaces.srv import StockfishMove, UserDecision
 from cobot2_interfaces.action import MoveChessPiece
 
 
 # ================= [설정 상수: 클래스 밖] =================
-FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
-FIREBASE_DB_URL = os.getenv("FIREBASE_DATABASE_URL", "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app")
-
-BOARD_STATE_PATH = "chess/board_state"
-UI_CONTROL_PATH = "chess/ui_control"
-# Phase 5 sub-phase D3: chess/chess_system Firebase 경로 제거. depth/skill_level/
-# default_turn은 stockfish 노드의 ROS2 parameter로 직접 관리 (UI → rosbridge
-# set_parameters). main은 Request에 빈 값 전달 → stockfish handler가 자기
-# parameter로 fallback.
+# Phase 5 sub-phase E (2026-05-10): Firebase 의존 일괄 제거.
+#   chess/board_state — D1에서 main read 제거.
+#   chess/chess_system — D3에서 stockfish parameter로 이전.
+#   chess/ui_control — E에서 read/write 모두 제거.
+# audit log는 game_logger 노드 + SQLite (Hard Rule #6) 영속화.
 
 # Phase 5 sub-phase B: vision→main bus is now ROS2 topic (TRANSIENT_LOCAL).
 # Relative topic name (Rule 5); resolves under main_controller's namespace.
@@ -100,6 +90,10 @@ VISION_RECEIVE_TIMEOUT_SEC = 3.0
 # 노드명(main_controller) 하위로 풀려 ``/main_controller/ui_status`` 경로가 됨.
 # Rule 5 준수 (절대 경로 하드코딩 없음).
 UI_STATUS_TOPIC = "~/ui_status"
+
+# Phase 5 sub-phase E: main → game_logger 명시 게임 이벤트. UI에는 노출 X (audit
+# 토픽 안전 경계). depth=10 — late-join logger도 최근 10개 이벤트 받아 갈 수 있게.
+GAME_EVENT_TOPIC = "~/game_event"
 
 # FSM 문자열 → UIStatus.STATE_* uint8 매핑. 신규 상태 추가 시 동기화 필요.
 _STATE_NAME_TO_UINT = {
@@ -121,64 +115,12 @@ ROBOT_ACTION_RESULT_TIMEOUT_SEC = 180.0
 # Firebase 읽기 폐기. fallback 값은 stockfish 노드의 ROS2 parameter (declare_parameter
 # 시점에 동일 default 적용). main은 빈 값(0/"")을 Request에 보낼 뿐.
 
-# Firebase ui_control.user_decision "NONE" 리셋용 상수 — additive Firebase writes에서
-# 사용. Phase 5 sub-phase D2에서 APPROVED/RECHECKED 상수는 UserDecision.srv로 이전.
-DECISION_NONE = "NONE"
-
-CMD_IDLE = "idle"
-
 GAME_OVER_TEXT = "게임 종료"
 # =========================================================
 
 
 def now_iso_ms() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
-
-
-class FirebaseClient:
-    def __init__(self, service_account_json: str, db_url: str):
-        self.service_account_json = service_account_json
-        self.db_url = db_url
-        self._initialized = False
-
-    def init(self):
-        if self._initialized:
-            return
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(self.service_account_json)
-            firebase_admin.initialize_app(cred, {"databaseURL": self.db_url})
-        self._initialized = True
-
-    def get_board_dict(self, board_state_path: str) -> dict:
-        self.init()
-        data = db.reference(board_state_path).get()
-        if data is None:
-            return {}
-        if isinstance(data, dict) and "board" in data and isinstance(data["board"], dict):
-            return data["board"]
-        if isinstance(data, dict):
-            return data
-        return {}
-
-    def set_board_state(self, board_state_path: str, board_dict: dict, extra: dict = None):
-        self.init()
-        payload = {
-            "updated_at": now_iso_ms(),
-            "piece_count": len(board_dict),
-            "board": board_dict,
-        }
-        if isinstance(extra, dict):
-            payload.update(extra)
-        db.reference(board_state_path).set(payload)
-
-    def update_ui_control(self, ui_control_path: str, patch: dict):
-        self.init()
-        db.reference(ui_control_path).update(patch)
-
-    def get_ui_control(self, ui_control_path: str) -> dict:
-        self.init()
-        data = db.reference(ui_control_path).get()
-        return data if isinstance(data, dict) else {}
 
 
 class MainController(Node):
@@ -201,8 +143,6 @@ class MainController(Node):
 
     def __init__(self):
         super().__init__("main_controller")
-
-        self.fb = FirebaseClient(FIREBASE_SERVICE_ACCOUNT_JSON, FIREBASE_DB_URL)
 
         # Vision board_state subscriber (Phase 5 sub-phase B): TRANSIENT_LOCAL latched
         # so a late-joining subscriber receives the publisher's most recent message.
@@ -228,6 +168,20 @@ class MainController(Node):
             UIStatus,
             UI_STATUS_TOPIC,
             board_state_qos,
+        )
+
+        # GameEvent publisher (Phase 5 sub-phase E). game_logger가 단독 구독.
+        # depth=10 — late-join logger에 최근 N개 이벤트 전달 가능.
+        game_event_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+        self.game_event_pub = self.create_publisher(
+            GameEvent,
+            GAME_EVENT_TOPIC,
+            game_event_qos,
         )
 
         self.ai_client = self.create_client(
@@ -279,6 +233,11 @@ class MainController(Node):
         self._working = False
         self._ai_suggested_move = ""
         self._final_board: dict = {}
+
+        # GameEvent game lifecycle tracking (sub-phase E). start_sampling 시 신규
+        # 발급, GAME_OVER / 빈 best_move (체크메이트) 시 리셋. 빈 문자열 = 진행 중
+        # 게임 없음.
+        self._current_game_id: str = ""
 
         # Phase 5 sub-phase D2: _poll_ui_decision 타이머 제거 (M1-5 RESOLVED).
         # 사용자 결정은 ~/user_decision Service callback에서 즉시 처리.
@@ -362,20 +321,31 @@ class MainController(Node):
         msg.final_board.piece_count = len(board_items)
         self.ui_status_pub.publish(msg)
 
-    def _reset_ui_for_new_job(self, job_id: str):
-        try:
-            self.fb.update_ui_control(UI_CONTROL_PATH, {
-                "verification": False,
-                "user_decision": DECISION_NONE,
-                "final_board": None,
-                "corrected_board": None,
-                "working": False,
-                "job_id": job_id,
-                "timestamp": datetime.now().isoformat(),
-            })
-        except Exception as e:
-            self.get_logger().warn(f"UI reset failed: {e}")
+    def _publish_game_event(
+        self,
+        kind: int,
+        game_id: str = "",
+        job_id: str = "",
+        uci: str = "",
+        fen: str = "",
+        result: str = "",
+    ) -> None:
+        """game_logger audit 토픽으로 명시 게임 이벤트 발행 (Phase 5 sub-phase E)."""
+        msg = GameEvent()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = ""
+        msg.kind = kind
+        msg.game_id = game_id
+        msg.job_id = job_id
+        msg.uci = uci
+        msg.fen = fen
+        msg.result = result
+        self.game_event_pub.publish(msg)
 
+    def _reset_ui_for_new_job(self, job_id: str):
+        # Phase 5 sub-phase E: Firebase ui_control reset write 제거. UIStatus 토픽
+        # 발행 (이미 _on_start_sampling에서 호출)이 UI 상태 동기화를 담당. stockfish
+        # 게임 상태 (dict_memory + castling_rights) 리셋만 잔존.
         if self.reset_client.wait_for_service(timeout_sec=2.0):
             self.reset_client.call_async(Trigger.Request())
         else:
@@ -398,10 +368,24 @@ class MainController(Node):
             self._working = False
             self._ai_suggested_move = ""
             self._final_board = {}
+            # Phase 5 sub-phase E: 게임이 진행 중이 아니면 신규 game_id 발급
+            # (KIND_GAME_START 이벤트 발행 대상). 이미 진행 중이면 같은 game 안의
+            # 다음 사용자 수 사이클로 간주.
+            new_game = (self._current_game_id == "")
+            if new_game:
+                self._current_game_id = self._job_id
+            game_id = self._current_game_id
             job_id = self._job_id
 
         self._publish_ui_status()
-        self.get_logger().info(f"[start_sampling] triggered. job_id={job_id}")
+        if new_game:
+            self._publish_game_event(
+                kind=GameEvent.KIND_GAME_START,
+                game_id=game_id,
+                job_id=job_id,
+            )
+            self.get_logger().info(f"[GameEvent] GAME_START game_id={game_id}")
+        self.get_logger().info(f"[start_sampling] triggered. job_id={job_id} game_id={game_id}")
         self._reset_ui_for_new_job(job_id)
         t = threading.Thread(
             target=self._job_make_and_publish_board, args=(job_id,), daemon=True
@@ -421,11 +405,9 @@ class MainController(Node):
             - Receives the latched ``vision/board_state`` message (TRANSIENT_LOCAL) within
               ``VISION_RECEIVE_TIMEOUT_SEC``. Single source of truth from vision node —
               vision is responsible for any internal smoothing / sample voting.
-            - Writes ``ui_control.verification = True`` to Firebase + publishes
-              ``UIStatus`` (verification=True, final_board, controller_state=WAIT_DECISION).
-              Firebase ``chess/board_state.set()`` write removed in sub-phase D1 — UI consumes
-              ``/vision/board_state`` directly.
-            - On success: transitions ``self._state`` to ``WAIT_DECISION``.
+            - On success: transitions ``self._state`` to ``WAIT_DECISION``, publishes
+              ``UIStatus`` (verification=True, final_board) + ``GameEvent``
+              (KIND_USER_BOARD_CONFIRMED).
             - On exception (incl. ``TimeoutError`` if vision is silent): transitions back to ``IDLE``.
         """
         try:
@@ -436,25 +418,19 @@ class MainController(Node):
             final_dict = self._wait_for_board_state(VISION_RECEIVE_TIMEOUT_SEC)
 
             self.get_logger().info(f"[SAMPLING] done. final pieces={len(final_dict)}")
-            self.get_logger().info("[UI] uploading final_board and enabling verification")
-
-            # sub-phase D1: chess/board_state.set() 제거 — UI는 ROS2 /vision/board_state 구독.
-            self.fb.update_ui_control(UI_CONTROL_PATH, {
-                "verification": True,
-                "user_decision": DECISION_NONE,
-                "final_board": final_dict,
-                "corrected_board": None,
-                "working": False,
-                "timestamp": datetime.now().isoformat(),
-                "job_id": job_id,
-            })
 
             with self._state_lock:
                 self._state = "WAIT_DECISION"
                 self._verification = True
                 self._working = False
                 self._final_board = dict(final_dict)
+                game_id = self._current_game_id
             self._publish_ui_status()
+            self._publish_game_event(
+                kind=GameEvent.KIND_USER_BOARD_CONFIRMED,
+                game_id=game_id,
+                job_id=job_id,
+            )
 
         except Exception as e:
             self.get_logger().error(f"Failed to make/publish final_dict: {e}")
@@ -523,14 +499,6 @@ class MainController(Node):
 
         if decision == UserDecision.Request.DECISION_APPROVED:
             self.get_logger().info("[UI] APPROVED. start stockfish/robot workflow")
-            try:
-                self.fb.update_ui_control(UI_CONTROL_PATH, {
-                    "user_decision": DECISION_NONE,
-                    "verification": False,
-                    "working": True,
-                })
-            except Exception:
-                pass
             with self._state_lock:
                 if self._state != "WAIT_DECISION":
                     response.accepted = False
@@ -552,18 +520,6 @@ class MainController(Node):
 
         if decision == UserDecision.Request.DECISION_RECHECKED:
             self.get_logger().info("[UI] RECHECKED. final_board updated, staying in WAIT_DECISION")
-            with self._state_lock:
-                final_snapshot = dict(self._final_board)
-            try:
-                self.fb.update_ui_control(UI_CONTROL_PATH, {
-                    "final_board": final_snapshot,
-                    "corrected_board": None,
-                    "user_decision": DECISION_NONE,
-                    "timestamp": datetime.now().isoformat(),
-                    "job_id": job_id,
-                })
-            except Exception:
-                pass
             self._publish_ui_status()
             response.accepted = True
             response.message = "rechecked"
@@ -575,23 +531,22 @@ class MainController(Node):
             # 예약된 slot — main 핸들러는 이미 동작.
             self.get_logger().info("[UI] GAME_OVER. transitioning to IDLE")
             with self._state_lock:
+                ended_game_id = self._current_game_id
                 self._state = "IDLE"
                 self._verification = False
                 self._working = False
                 self._ai_suggested_move = GAME_OVER_TEXT
                 self._job_id = ""
                 self._final_board = {}
-            try:
-                self.fb.update_ui_control(UI_CONTROL_PATH, {
-                    "ai_suggested_move": GAME_OVER_TEXT,
-                    "verification": False,
-                    "working": False,
-                    "user_decision": DECISION_NONE,
-                    "timestamp": datetime.now().isoformat(),
-                })
-            except Exception:
-                pass
+                self._current_game_id = ""
             self._publish_ui_status()
+            if ended_game_id:
+                self._publish_game_event(
+                    kind=GameEvent.KIND_GAME_END,
+                    game_id=ended_game_id,
+                    job_id=job_id,
+                    result="resign",
+                )
             response.accepted = True
             response.message = "game_over"
             return response
@@ -608,72 +563,48 @@ class MainController(Node):
             job_id: str — timestamp-based identifier set when WAIT_DECISION was entered.
 
         Side Effects:
-            - Reads Firebase ``ui_control`` to choose the input board (``corrected_board`` if present
-              and non-empty, else ``final_board``, else live ``board_state``).
-            - Calls service ``StockfishMove`` with the board only (sub-phase D3) — engine config
-              (depth/skill_level/default_turn)은 stockfish 노드의 ROS2 parameter 단일 경로.
-              On empty ``best_move`` writes ``ai_suggested_move = "게임 종료"`` to ``ui_control``
-              and returns (game-over branch).
+            - 보드 source: ``self._final_board`` (UserDecision으로 갱신된 최신값).
+              비어 있으면 live ROS2 ``vision/board_state`` fallback (TimeoutError 가능).
+            - Calls service ``StockfishMove`` (board만 전달) — engine config는 stockfish
+              노드 parameter 단일 경로. 응답에 best_move + fen 포함.
+            - 빈 ``best_move`` → 게임 종료 (KIND_GAME_END "checkmate") + game_id 리셋.
+            - 정상 ``best_move`` → robot action 실행 + KIND_AI_MOVE 이벤트 발행.
             - Sends an action goal to ``move_chess_piece`` and waits up to
               ``ROBOT_ACTION_RESULT_TIMEOUT_SEC`` (=180 s) for the result.
-            - In the ``finally`` block: writes ``ui_control.working = False`` and transitions
-              ``self._state`` to ``IDLE``.
+            - In the ``finally`` block: transitions ``self._state`` to ``IDLE``.
         """
         try:
-            ui = self.fb.get_ui_control(UI_CONTROL_PATH)
+            with self._state_lock:
+                board_dict = dict(self._final_board)
+                game_id = self._current_game_id
 
-            corrected_board = ui.get("corrected_board")
-            final_board = ui.get("final_board")
-
-            if isinstance(corrected_board, dict) and corrected_board:
-                board_dict = corrected_board
-                try:
-                    self.fb.update_ui_control(UI_CONTROL_PATH, {
-                        "final_board": board_dict,
-                        "corrected_board": None,
-                        "job_id": job_id,
-                        "timestamp": datetime.now().isoformat(),
-                    })
-                except Exception:
-                    pass
-                self.get_logger().info("[UI] Using corrected_board for stockfish/robot (APPROVED).")
-
-            elif isinstance(final_board, dict) and final_board:
-                board_dict = final_board
-                self.get_logger().info("[UI] Using final_board for stockfish/robot (APPROVED).")
-            else:
-                # Live fallback (Phase 5 sub-phase B): pull the most recent ROS2 board_state
-                # cached by the subscriber. If vision has been silent since startup this
-                # raises TimeoutError, surfaced as a workflow exception (logged and
-                # cleaned up by the outer ``finally``).
+            if not board_dict:
+                # final_board 비어 있으면 live vision board_state fallback.
+                # vision이 침묵 중이면 TimeoutError → outer except에서 정리.
                 board_dict = self._wait_for_board_state(VISION_RECEIVE_TIMEOUT_SEC)
-                self.get_logger().info("[UI] Using board_state for stockfish/robot (APPROVED).")
+                self.get_logger().info("[workflow] using live board_state fallback.")
+            else:
+                self.get_logger().info("[workflow] using cached final_board (D2 path).")
 
-            # sub-phase D3: 엔진 설정값은 stockfish 노드 parameter 단일 경로. UI가
-            # set_parameters로 미리 설정한 값을 stockfish가 직접 읽어 사용.
-            best_move = self._call_stockfish(board_dict)
+            # sub-phase D3: 엔진 설정값은 stockfish 노드 parameter 단일 경로.
+            best_move, fen = self._call_stockfish(board_dict)
             if not best_move:
-                # ✅ GAME OVER 처리: best_move가 없으면 UI에 '게임 종료' 표시 후 종료 루틴으로 빠짐
-                self.get_logger().error("No best_move from stockfish.")
-                try:
-                    self.fb.update_ui_control(UI_CONTROL_PATH, {
-                        "ai_suggested_move": GAME_OVER_TEXT,
-                        "ai_updated_at": datetime.now().isoformat(),
-                        "job_id": job_id,
-                    })
-                except Exception:
-                    pass
+                # GAME OVER (체크메이트/스테일메이트): stockfish가 빈 best_move 반환.
+                self.get_logger().error("No best_move from stockfish — game over.")
                 with self._state_lock:
                     self._ai_suggested_move = GAME_OVER_TEXT
+                    ended_game_id = self._current_game_id
+                    self._current_game_id = ""
                 self._publish_ui_status()
+                if ended_game_id:
+                    self._publish_game_event(
+                        kind=GameEvent.KIND_GAME_END,
+                        game_id=ended_game_id,
+                        job_id=job_id,
+                        result="checkmate",
+                    )
                 return
 
-            self.fb.update_ui_control(UI_CONTROL_PATH, {
-                "ai_suggested_move": best_move,
-                "ai_updated_at": datetime.now().isoformat(),
-                "command": CMD_IDLE,
-                "job_id": job_id,
-            })
             with self._state_lock:
                 self._ai_suggested_move = best_move
             self._publish_ui_status()
@@ -684,16 +615,19 @@ class MainController(Node):
                 return
 
             self.get_logger().info("Robot action completed.")
+            # KIND_AI_MOVE는 robot action 성공 후 발행 — 실제로 둔 수만 audit에 남김.
+            self._publish_game_event(
+                kind=GameEvent.KIND_AI_MOVE,
+                game_id=game_id,
+                job_id=job_id,
+                uci=best_move,
+                fen=fen,
+            )
 
         except Exception as e:
             self.get_logger().error(f"Workflow failed: {e}")
 
         finally:
-            try:
-                self.fb.update_ui_control(UI_CONTROL_PATH, {"working": False})
-            except Exception:
-                pass
-
             with self._state_lock:
                 self._state = "IDLE"
                 self._job_id = ""
@@ -701,12 +635,17 @@ class MainController(Node):
                 self._verification = False
             self._publish_ui_status()
 
-    def _call_stockfish(self, board_dict: dict) -> str:
+    def _call_stockfish(self, board_dict: dict) -> tuple[str, str]:
+        """Call StockfishMove service.
+
+        Returns: (best_move, fen). best_move=="" → game over / failure.
+        fen은 sub-phase E에서 추가 — game_logger audit에 사용.
+        """
         # sub-phase D3: 엔진 설정값(depth/skill_level/turn)은 stockfish 노드 parameter로
         # 일원화. srv는 보드 데이터만 전달.
         if not self.ai_client.wait_for_service(timeout_sec=SERVICE_TIMEOUT_SEC):
             self.get_logger().error("Stockfish service not available.")
-            return ""
+            return "", ""
 
         req = StockfishMove.Request()
         req.pieces_data = json.dumps(board_dict)
@@ -718,13 +657,13 @@ class MainController(Node):
         while rclpy.ok() and not future.done():
             if (time.time() - start) > SERVICE_TIMEOUT_SEC:
                 self.get_logger().error("Stockfish service call timeout.")
-                return ""
+                return "", ""
             time.sleep(0.05)
 
         resp = future.result()
         if resp is None or (not resp.success) or (not resp.best_move):
-            return ""
-        return resp.best_move
+            return "", ""
+        return resp.best_move, getattr(resp, "fen", "") or ""
 
     def _send_robot_action_and_wait(self, best_move: str, board_dict: dict) -> bool:
         if not self.robot_action_client.wait_for_server(timeout_sec=ROBOT_ACTION_SEND_TIMEOUT_SEC):
