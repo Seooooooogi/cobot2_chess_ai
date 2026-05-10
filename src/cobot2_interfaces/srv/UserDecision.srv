@@ -1,0 +1,24 @@
+# UI → MainController user decision Service (Phase 5 sub-phase D2).
+#
+# WAIT_DECISION 상태에서 사용자가 비전 인식 결과 검증을 마쳤음을 알리는 호출.
+# Firebase ui_control polling timer (_poll_ui_decision)의 ROS2 native 대체.
+#
+# Race protection:
+#   handler는 self._state == "WAIT_DECISION" 그리고 self._job_id == request.job_id
+#   를 모두 검증한다. 둘 중 하나라도 불일치하면 accepted=false 반환.
+#
+# corrected_board:
+#   squares=[] 이면 "수정 없음" — main은 기존 self._final_board 유지.
+#   squares 비어있지 않으면 self._final_board를 corrected_board로 교체.
+#   APPROVED/RECHECKED 모두 동일 의미.
+
+uint8 DECISION_APPROVED = 0       # 검증 OK — RUNNING 진입 (stockfish + robot 시작)
+uint8 DECISION_RECHECKED = 1      # 보드 수정 후 재검증 요청 — WAIT_DECISION 유지
+uint8 DECISION_GAME_OVER = 2      # 게임 종료 선언 — IDLE 복귀
+
+uint8 decision
+string job_id
+cobot2_interfaces/BoardState corrected_board
+---
+bool accepted
+string message

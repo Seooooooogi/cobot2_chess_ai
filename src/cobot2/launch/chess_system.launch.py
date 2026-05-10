@@ -73,7 +73,8 @@ def generate_launch_description():
                 'port': 9090,
                 # Phase 5 sub-phase D1: UI가 /main_controller/ui_status 토픽 구독
                 'topics_glob': '[/vision/*, /main_controller/ui_status]',
-                'services_glob': '[/rosapi/*]',
+                # Phase 5 sub-phase D2: UI가 /main_controller/user_decision Service 호출
+                'services_glob': '[/rosapi/*, /main_controller/user_decision]',
                 'actions_glob': '[]',
             }],
         ),

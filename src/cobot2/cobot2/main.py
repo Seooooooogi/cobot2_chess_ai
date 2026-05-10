@@ -9,6 +9,10 @@ Role:
 ROS2 Interfaces:
     Service: ``~/start_sampling`` (std_srvs/Trigger) — state-change trigger; IDLE→SAMPLING.
              Resolves to /main_controller/start_sampling.
+    Service: ``~/user_decision`` (cobot2_interfaces/srv/UserDecision) — Phase 5 sub-phase D2.
+             Replaces Firebase ui_control polling. Validates state==WAIT_DECISION and
+             matching job_id, then APPROVED → RUNNING, RECHECKED → stay+update final_board,
+             GAME_OVER → IDLE. Resolves to /main_controller/user_decision.
     Subscriber: Topic ``vision/board_state`` (cobot2_interfaces/msg/BoardState) —
                 RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). Cached latest is used as the
                 board snapshot for SAMPLING and as the live fallback in RUNNING.
@@ -19,12 +23,12 @@ ROS2 Interfaces:
     Client: Service ``StockfishMove``      (cobot2_interfaces/StockfishMove)
     Client: Action  ``move_chess_piece``  (cobot2_interfaces/MoveChessPiece)
 
-Timer & Threads:
-    - Timer ``_poll_ui_decision`` — 0.2 s, polls Firebase ``ui_control`` for APPROVED / RE-CHECKED
+Threads:
     - Daemon thread ``_job_make_and_publish_board`` — receives the latched ``vision/board_state``
       message (TRANSIENT_LOCAL) within ``VISION_RECEIVE_TIMEOUT_SEC``, no resampling/voting
       (single source of truth from vision node), spawned in ``_on_start_sampling``.
-    - Daemon thread ``_job_stockfish_then_robot_then_wakeup`` — service call + action goal, spawned in ``_poll_ui_decision``
+    - Daemon thread ``_job_stockfish_then_robot_then_wakeup`` — service call + action goal,
+      spawned in ``_on_user_decision`` (APPROVED branch).
 
 External Dependencies:
     - Firebase Realtime DB — read/write ``chess/board_state``, ``chess/ui_control``, ``chess/chess_system``
@@ -34,11 +38,13 @@ Issues (Phase 1-1 doc Node 1):
     - M1-3 RESOLVED 2026-05-01: ``FIREBASE_SERVICE_ACCOUNT_JSON`` env-ized via ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var; ``FIREBASE_DB_URL`` via ``FIREBASE_DATABASE_URL`` env var.
     - M1-1 RESOLVED 2026-05-04: ``~/start_sampling`` (Trigger) 로 대체.
     - ~~M1-2: pub/sub QoS 미명시 (Rule 4)~~ **RESOLVED 2026-05-04**: voice 제거로 pub/sub 0건. service/action endpoint에 ``qos_profile_services_default`` / ``qos_profile_action_status_default`` 명시 (line 234-256).
-    - M1-4 PARTIAL Phase 5 sub-phase D1 2026-05-10: vision→main + main→UI status
-      migrated to ROS2 (``vision/board_state``, ``ui_status``). UI→main user_decision
-      흐름과 ``chess_system`` parameter는 sub-phase D2/D3에서 처리. Firebase
-      ``board_state.set()`` write는 D1에서 제거 — UI는 ROS2 vision 토픽 직접 구독.
-    - MINOR M1-5: workflow threads use ``time.sleep`` polling on Futures inside ``_call_stockfish`` and ``_send_robot_action_and_wait`` — Future callbacks preferred.
+    - M1-4 PARTIAL Phase 5 sub-phase D2 2026-05-10: vision→main, main→UI status, UI→main
+      user_decision 모두 ROS2로 이전 (``vision/board_state``, ``ui_status``,
+      ``user_decision``). ``chess_system`` parameter는 sub-phase D3에서 처리.
+      Firebase ``ui_control`` writes는 additive 잔존 (sub-phase E에서 일괄 제거).
+    - M1-5 RESOLVED Phase 5 sub-phase D2 2026-05-10: ``_poll_ui_decision`` 0.2s timer
+      제거. ``~/user_decision`` Service handler가 즉시 처리. workflow thread 내부
+      Future polling (``_call_stockfish``, ``_send_robot_action_and_wait``)은 별도 트랙.
     - M1-6 RESOLVED 2026-05-04: Service 로 대체 — voice_control_node 미실행 무한 대기 해소.
     - M1-7 RESOLVED 2026-05-04: voice_status pub 제거 (옵션 a) — dead pub 해소.
 """
@@ -66,7 +72,7 @@ import firebase_admin
 from firebase_admin import credentials, db
 
 from cobot2_interfaces.msg import BoardState, UIStatus
-from cobot2_interfaces.srv import StockfishMove
+from cobot2_interfaces.srv import StockfishMove, UserDecision
 from cobot2_interfaces.action import MoveChessPiece
 
 
@@ -108,12 +114,11 @@ DEFAULT_DEPTH = 15
 DEFAULT_DIFFICULTY = 10
 DEFAULT_TURN = "w"
 
-DECISION_APPROVED = "APPROVED"
-DECISION_RECHECKED = "RE-CHECKED"
+# Firebase ui_control.user_decision "NONE" 리셋용 상수 — additive Firebase writes에서
+# 사용. Phase 5 sub-phase D2에서 APPROVED/RECHECKED 상수는 UserDecision.srv로 이전.
 DECISION_NONE = "NONE"
 
 CMD_IDLE = "idle"
-DECISION_POLL_SEC = 0.2
 
 GAME_OVER_TEXT = "게임 종료"
 # =========================================================
@@ -271,6 +276,17 @@ class MainController(Node):
             qos_profile=qos_profile_services_default,
         )
 
+        # Phase 5 sub-phase D2: UserDecision Service — Firebase ui_control polling 대체.
+        # ``~`` private namespace → /main_controller/user_decision. 같은 callback group
+        # (default MutuallyExclusive) 안에서 _on_start_sampling과 직렬 실행되어
+        # FSM 전이가 race-free.
+        self.user_decision_srv = self.create_service(
+            UserDecision,
+            "~/user_decision",
+            self._on_user_decision,
+            qos_profile=qos_profile_services_default,
+        )
+
         self._state_lock = threading.Lock()
         self._state = "IDLE"
         self._job_id = ""
@@ -282,12 +298,16 @@ class MainController(Node):
         self._ai_suggested_move = ""
         self._final_board: dict = {}
 
-        self.timer = self.create_timer(DECISION_POLL_SEC, self._poll_ui_decision)
+        # Phase 5 sub-phase D2: _poll_ui_decision 타이머 제거 (M1-5 RESOLVED).
+        # 사용자 결정은 ~/user_decision Service callback에서 즉시 처리.
 
         # 초기 IDLE 상태 latched publish — 페이지 로드 직후 UI 동기화.
         self._publish_ui_status()
 
-        self.get_logger().info("MainController ready. Service: /main_controller/start_sampling (std_srvs/Trigger).")
+        self.get_logger().info(
+            "MainController ready. Services: /main_controller/start_sampling (Trigger), "
+            "/main_controller/user_decision (UserDecision)."
+        )
 
     def _on_board_state(self, msg: BoardState) -> None:
         # Subscriber callback runs on the rclpy executor thread; worker threads consume
@@ -464,67 +484,140 @@ class MainController(Node):
                 self._final_board = {}
             self._publish_ui_status()
 
-    def _poll_ui_decision(self):
+    def _on_user_decision(
+        self, request: UserDecision.Request, response: UserDecision.Response
+    ) -> UserDecision.Response:
+        """Service handler for ``~/user_decision`` (Phase 5 sub-phase D2).
+
+        Replaces ``_poll_ui_decision`` Firebase polling. Handler runs in the rclpy
+        executor thread (default MutuallyExclusiveCallbackGroup, same as
+        ``_on_start_sampling`` — FSM transitions are serialized).
+
+        Validation order:
+            1. ``self._state == "WAIT_DECISION"`` — 다른 상태면 거부.
+            2. ``self._job_id == request.job_id`` — stale 결정 거부.
+            3. ``request.decision in {APPROVED, RECHECKED, GAME_OVER}`` — unknown 거부.
+
+        ``request.corrected_board`` (BoardState) 가 비어있지 않으면 ``self._final_board``를
+        해당 dict로 교체. APPROVED/RECHECKED 모두 동일 의미.
+        """
+        # 1. State + job_id 검증
         with self._state_lock:
-            if self._state != "WAIT_DECISION":
-                return
-            job_id = self._job_id
+            current_state = self._state
+            current_job_id = self._job_id
 
-        try:
-            ui = self.fb.get_ui_control(UI_CONTROL_PATH)
-            decision = (ui.get("user_decision") or "").strip()
-            ui_job_id = (ui.get("job_id") or "").strip()
+        if current_state != "WAIT_DECISION":
+            response.accepted = False
+            response.message = f"wrong_state: {current_state}"
+            self.get_logger().warn(
+                f"user_decision rejected: state={current_state} (need WAIT_DECISION)"
+            )
+            return response
 
-            if ui_job_id and ui_job_id != job_id:
-                return
+        if current_job_id != request.job_id:
+            response.accepted = False
+            response.message = f"stale_job: have={current_job_id} got={request.job_id}"
+            self.get_logger().warn(
+                f"user_decision rejected: stale job_id (have={current_job_id}, got={request.job_id})"
+            )
+            return response
 
-            if decision == DECISION_RECHECKED:
-                corrected = ui.get("corrected_board")
-                if isinstance(corrected, dict):
-                    self.get_logger().info("[UI] corrected_board received. updating final_board")
-                    # sub-phase D1: chess/board_state.set() 제거 — UI는 ROS2 토픽 사용.
-                    self.fb.update_ui_control(UI_CONTROL_PATH, {
-                        "final_board": corrected,
-                        "corrected_board": None,
-                        "user_decision": DECISION_NONE,
-                        "timestamp": datetime.now().isoformat(),
-                        "job_id": job_id,
-                    })
-                    with self._state_lock:
-                        self._final_board = dict(corrected)
-                    self._publish_ui_status()
-                else:
-                    self.fb.update_ui_control(UI_CONTROL_PATH, {
-                        "user_decision": DECISION_NONE,
-                        "timestamp": datetime.now().isoformat(),
-                        "job_id": job_id,
-                    })
-                return
+        # 2. corrected_board 처리 — 비어있지 않으면 _final_board 갱신
+        corrected = request.corrected_board
+        if (
+            corrected.squares
+            and len(corrected.squares) == len(corrected.pieces)
+        ):
+            new_board = dict(zip(corrected.squares, corrected.pieces))
+            with self._state_lock:
+                self._final_board = new_board
+            self.get_logger().info(
+                f"[UI] corrected_board applied: {len(new_board)} pieces"
+            )
 
-            if decision != DECISION_APPROVED:
-                return
+        # 3. decision branching
+        decision = int(request.decision)
+        job_id = request.job_id
 
-            self.get_logger().info("[UI] APPROVED received. start stockfish/robot workflow")
-
-            self.fb.update_ui_control(UI_CONTROL_PATH, {
-                "user_decision": DECISION_NONE,
-                "verification": False,
-                "working": True,
-            })
-
+        if decision == UserDecision.Request.DECISION_APPROVED:
+            self.get_logger().info("[UI] APPROVED. start stockfish/robot workflow")
+            try:
+                self.fb.update_ui_control(UI_CONTROL_PATH, {
+                    "user_decision": DECISION_NONE,
+                    "verification": False,
+                    "working": True,
+                })
+            except Exception:
+                pass
             with self._state_lock:
                 if self._state != "WAIT_DECISION":
-                    return
+                    response.accepted = False
+                    response.message = "state_changed_during_handling"
+                    return response
                 self._state = "RUNNING"
                 self._verification = False
                 self._working = True
             self._publish_ui_status()
-
-            t = threading.Thread(target=self._job_stockfish_then_robot_then_wakeup, args=(job_id,), daemon=True)
+            t = threading.Thread(
+                target=self._job_stockfish_then_robot_then_wakeup,
+                args=(job_id,),
+                daemon=True,
+            )
             t.start()
+            response.accepted = True
+            response.message = "approved"
+            return response
 
-        except Exception as e:
-            self.get_logger().error(f"Decision polling error: {e}")
+        if decision == UserDecision.Request.DECISION_RECHECKED:
+            self.get_logger().info("[UI] RECHECKED. final_board updated, staying in WAIT_DECISION")
+            with self._state_lock:
+                final_snapshot = dict(self._final_board)
+            try:
+                self.fb.update_ui_control(UI_CONTROL_PATH, {
+                    "final_board": final_snapshot,
+                    "corrected_board": None,
+                    "user_decision": DECISION_NONE,
+                    "timestamp": datetime.now().isoformat(),
+                    "job_id": job_id,
+                })
+            except Exception:
+                pass
+            self._publish_ui_status()
+            response.accepted = True
+            response.message = "rechecked"
+            return response
+
+        if decision == UserDecision.Request.DECISION_GAME_OVER:
+            # 현 UI(UI.html btn-ok/btn-check)에는 GAME_OVER 버튼이 배선되어 있지 않음.
+            # 향후 "give up" 버튼 추가 시 callUserDecision(DECISION_GAME_OVER, {}) 사용.
+            # 예약된 slot — main 핸들러는 이미 동작.
+            self.get_logger().info("[UI] GAME_OVER. transitioning to IDLE")
+            with self._state_lock:
+                self._state = "IDLE"
+                self._verification = False
+                self._working = False
+                self._ai_suggested_move = GAME_OVER_TEXT
+                self._job_id = ""
+                self._final_board = {}
+            try:
+                self.fb.update_ui_control(UI_CONTROL_PATH, {
+                    "ai_suggested_move": GAME_OVER_TEXT,
+                    "verification": False,
+                    "working": False,
+                    "user_decision": DECISION_NONE,
+                    "timestamp": datetime.now().isoformat(),
+                })
+            except Exception:
+                pass
+            self._publish_ui_status()
+            response.accepted = True
+            response.message = "game_over"
+            return response
+
+        response.accepted = False
+        response.message = f"unknown_decision: {decision}"
+        self.get_logger().warn(f"user_decision rejected: unknown decision {decision}")
+        return response
 
     def _job_stockfish_then_robot_then_wakeup(self, job_id: str):
         """Worker thread (daemon) — call Stockfish and send robot action.

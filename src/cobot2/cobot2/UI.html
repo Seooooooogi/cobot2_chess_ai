@@ -173,6 +173,57 @@
       },
     });
 
+    // Phase 5 sub-phase D2: UI → main_controller user_decision Service.
+    // Firebase ui_control.user_decision write 대체. UserDecision.srv 정수 enum.
+    const DECISION_APPROVED = 0;
+    const DECISION_RECHECKED = 1;
+    const DECISION_GAME_OVER = 2;
+    const userDecisionService = new ROSLIB.Service({
+      ros: ros,
+      name: "/main_controller/user_decision",
+      serviceType: "cobot2_interfaces/srv/UserDecision",
+    });
+
+    // UIStatus.job_id 최신값 — user_decision 호출 시 race protection으로 첨부.
+    let latestJobId = "";
+
+    function dictToBoardState(boardDict) {
+      const squares = [];
+      const pieces = [];
+      for (const sq in boardDict) {
+        squares.push(sq);
+        pieces.push(boardDict[sq]);
+      }
+      return {
+        header: {
+          stamp: { sec: 0, nanosec: 0 },
+          frame_id: "chess_board",
+        },
+        squares,
+        pieces,
+        piece_count: squares.length,
+      };
+    }
+
+    function callUserDecision(decision, correctedBoardDict) {
+      const request = new ROSLIB.ServiceRequest({
+        decision,
+        job_id: latestJobId,
+        corrected_board: dictToBoardState(correctedBoardDict || {}),
+      });
+      userDecisionService.callService(request, (response) => {
+        if (response.accepted) {
+          console.log(`[user_decision] accepted: ${response.message}`);
+        } else {
+          console.warn(`[user_decision] rejected: ${response.message}`);
+          $("#status").text(`결정 거부: ${response.message}`);
+        }
+      }, (error) => {
+        console.error("[user_decision] service call failed:", error);
+        $("#status").text(`Service 호출 실패: ${error}`);
+      });
+    }
+
     let isManualMode = false;
     let verificationOn = false;
 
@@ -272,6 +323,9 @@
     uiStatusTopic.subscribe((msg) => {
       if (!msg) return;
 
+      // D2 race protection: 최신 job_id를 추적하여 user_decision 호출 시 첨부.
+      latestJobId = msg.job_id || "";
+
       // 추천 수 표시. 빈 문자열도 그대로 반영해 SAMPLING 진입 시 이전 게임 잔류 방지.
       $("#aiMoveDisplay").val(msg.ai_suggested_move || "");
 
@@ -335,7 +389,8 @@
       isManualMode = false;
       $("#btn-check").hide();
 
-      // ✅ 여기만 추가/수정: APPROVED 시점에도 현재 보드 상태를 corrected_board로 함께 보냄
+      // 현재 보드 상태를 corrected_board로 함께 보냄 — 사용자가 수동 수정 후 승인한
+      // 케이스 대응. main이 비어있지 않으면 _final_board를 갱신한 뒤 RUNNING 진입.
       const currentPos = board.position();
       const pythonFormatBoard = {};
       for (let sq in currentPos) {
@@ -343,12 +398,7 @@
         pythonFormatBoard[sq.toUpperCase()] = p[0].toUpperCase() + p[1].toUpperCase();
       }
 
-      update(controlRef, {
-        corrected_board: pythonFormatBoard,
-        user_decision: "APPROVED",
-        timestamp: new Date().toISOString()
-      });
-
+      callUserDecision(DECISION_APPROVED, pythonFormatBoard);
       $("#status").text("승인됨: 로봇이 이동합니다.");
     });
 
@@ -367,12 +417,7 @@
         pythonFormatBoard[sq.toUpperCase()] = p[0].toUpperCase() + p[1].toUpperCase();
       }
 
-      // 핵심: board_state에 직접 쓰지 않고, main으로 전달
-      update(controlRef, {
-        corrected_board: pythonFormatBoard,
-        user_decision: "RE-CHECKED",
-        timestamp: new Date().toISOString()
-      });
+      callUserDecision(DECISION_RECHECKED, pythonFormatBoard);
 
       $("#btn-check").hide();
       isManualMode = false;

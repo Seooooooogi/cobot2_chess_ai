@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BoardState.msg"
   "msg/UIStatus.msg"
   "srv/StockfishMove.srv"
+  "srv/UserDecision.srv"
   "action/MoveChessPiece.action"
   DEPENDENCIES std_msgs action_msgs
 )
