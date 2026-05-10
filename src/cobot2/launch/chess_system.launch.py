@@ -73,8 +73,19 @@ def generate_launch_description():
                 'port': 9090,
                 # Phase 5 sub-phase D1: UI가 /main_controller/ui_status 토픽 구독
                 'topics_glob': '[/vision/*, /main_controller/ui_status]',
-                # Phase 5 sub-phase D2: UI가 /main_controller/user_decision Service 호출
-                'services_glob': '[/rosapi/*, /main_controller/user_decision]',
+                # Phase 5 sub-phase D2/D3: UI가 user_decision Service + stockfish parameter
+                # 표준 service 5종 (get/set/list/describe + get_parameter_types) 호출.
+                # Rule 9 정밀 노출 — 와일드카드 대신 명시.
+                # 의도적 미포함:
+                #   - /chess_ai_node/reset_chess_state — 웹 UI 게임 리셋 노출 차단.
+                #     향후 D4/E에서 reset 버튼 추가 시 이 list에 명시 필요.
+                #   - /move_chess_piece, /dsr01/* — motion 인터페이스, Rule 9.
+                'services_glob': (
+                    '[/rosapi/*, /main_controller/user_decision, '
+                    '/chess_ai_node/get_parameters, /chess_ai_node/set_parameters, '
+                    '/chess_ai_node/list_parameters, /chess_ai_node/describe_parameters, '
+                    '/chess_ai_node/get_parameter_types]'
+                ),
                 'actions_glob': '[]',
             }],
         ),

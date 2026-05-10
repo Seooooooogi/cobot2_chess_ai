@@ -31,17 +31,21 @@ Threads:
       spawned in ``_on_user_decision`` (APPROVED branch).
 
 External Dependencies:
-    - Firebase Realtime DB — read/write ``chess/board_state``, ``chess/ui_control``, ``chess/chess_system``
-    - cobot2_interfaces — ``StockfishMove.srv``, ``MoveChessPiece.action``
+    - Firebase Realtime DB — read/write ``chess/ui_control`` (sub-phase E에서 일괄 제거).
+      ``chess/board_state`` (D1)와 ``chess/chess_system`` (D3) 경로는 main 측에서 더 이상
+      참조하지 않음.
+    - cobot2_interfaces — ``StockfishMove.srv``, ``MoveChessPiece.action``,
+      ``UIStatus.msg``, ``UserDecision.srv``, ``BoardState.msg``.
 
 Issues (Phase 1-1 doc Node 1):
     - M1-3 RESOLVED 2026-05-01: ``FIREBASE_SERVICE_ACCOUNT_JSON`` env-ized via ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var; ``FIREBASE_DB_URL`` via ``FIREBASE_DATABASE_URL`` env var.
     - M1-1 RESOLVED 2026-05-04: ``~/start_sampling`` (Trigger) 로 대체.
     - ~~M1-2: pub/sub QoS 미명시 (Rule 4)~~ **RESOLVED 2026-05-04**: voice 제거로 pub/sub 0건. service/action endpoint에 ``qos_profile_services_default`` / ``qos_profile_action_status_default`` 명시 (line 234-256).
-    - M1-4 PARTIAL Phase 5 sub-phase D2 2026-05-10: vision→main, main→UI status, UI→main
-      user_decision 모두 ROS2로 이전 (``vision/board_state``, ``ui_status``,
-      ``user_decision``). ``chess_system`` parameter는 sub-phase D3에서 처리.
-      Firebase ``ui_control`` writes는 additive 잔존 (sub-phase E에서 일괄 제거).
+    - M1-4 PARTIAL Phase 5 sub-phase D3 2026-05-10: vision→main, main→UI status, UI→main
+      user_decision, UI→stockfish parameter 모두 ROS2로 이전 (``vision/board_state``,
+      ``ui_status``, ``user_decision``, stockfish 노드 ``depth``/``skill_level``/
+      ``default_turn`` parameter). Firebase ``ui_control`` writes는 additive 잔존
+      (sub-phase E에서 일괄 제거 + game_logger 노드 신설).
     - M1-5 RESOLVED Phase 5 sub-phase D2 2026-05-10: ``_poll_ui_decision`` 0.2s timer
       제거. ``~/user_decision`` Service handler가 즉시 처리. workflow thread 내부
       Future polling (``_call_stockfish``, ``_send_robot_action_and_wait``)은 별도 트랙.
@@ -82,7 +86,10 @@ FIREBASE_DB_URL = os.getenv("FIREBASE_DATABASE_URL", "https://chess-43355-defaul
 
 BOARD_STATE_PATH = "chess/board_state"
 UI_CONTROL_PATH = "chess/ui_control"
-CHESS_SYSTEM_PATH = "chess/chess_system"
+# Phase 5 sub-phase D3: chess/chess_system Firebase 경로 제거. depth/skill_level/
+# default_turn은 stockfish 노드의 ROS2 parameter로 직접 관리 (UI → rosbridge
+# set_parameters). main은 Request에 빈 값 전달 → stockfish handler가 자기
+# parameter로 fallback.
 
 # Phase 5 sub-phase B: vision→main bus is now ROS2 topic (TRANSIENT_LOCAL).
 # Relative topic name (Rule 5); resolves under main_controller's namespace.
@@ -110,9 +117,9 @@ ROBOT_ACTION_NAME = "move_chess_piece"
 ROBOT_ACTION_SEND_TIMEOUT_SEC = 10.0
 ROBOT_ACTION_RESULT_TIMEOUT_SEC = 180.0
 
-DEFAULT_DEPTH = 15
-DEFAULT_DIFFICULTY = 10
-DEFAULT_TURN = "w"
+# Phase 5 sub-phase D3: DEFAULT_DEPTH/DIFFICULTY/TURN 상수 제거 — chess_system
+# Firebase 읽기 폐기. fallback 값은 stockfish 노드의 ROS2 parameter (declare_parameter
+# 시점에 동일 default 적용). main은 빈 값(0/"")을 Request에 보낼 뿐.
 
 # Firebase ui_control.user_decision "NONE" 리셋용 상수 — additive Firebase writes에서
 # 사용. Phase 5 sub-phase D2에서 APPROVED/RECHECKED 상수는 UserDecision.srv로 이전.
@@ -172,31 +179,6 @@ class FirebaseClient:
         self.init()
         data = db.reference(ui_control_path).get()
         return data if isinstance(data, dict) else {}
-
-    def get_chess_system_params(self, chess_system_path: str):
-        self.init()
-        data = db.reference(chess_system_path).get()
-        if not isinstance(data, dict):
-            return DEFAULT_DEPTH, DEFAULT_DIFFICULTY, DEFAULT_TURN
-
-        depth = data.get("depth", DEFAULT_DEPTH)
-        difficulty = data.get("difficulty", DEFAULT_DIFFICULTY)
-        turn = data.get("turn", DEFAULT_TURN)
-
-        try:
-            depth = int(depth)
-        except Exception:
-            depth = DEFAULT_DEPTH
-
-        try:
-            difficulty = int(difficulty)
-        except Exception:
-            difficulty = DEFAULT_DIFFICULTY
-
-        if turn not in ["w", "b"]:
-            turn = DEFAULT_TURN
-
-        return depth, difficulty, turn
 
 
 class MainController(Node):
@@ -628,9 +610,10 @@ class MainController(Node):
         Side Effects:
             - Reads Firebase ``ui_control`` to choose the input board (``corrected_board`` if present
               and non-empty, else ``final_board``, else live ``board_state``).
-            - Calls service ``StockfishMove`` with the board + ``depth``/``difficulty``/``turn`` from
-              ``chess_system``. On empty ``best_move`` writes ``ai_suggested_move = "게임 종료"`` to
-              ``ui_control`` and returns (game-over branch).
+            - Calls service ``StockfishMove`` with the board only (sub-phase D3) — engine config
+              (depth/skill_level/default_turn)은 stockfish 노드의 ROS2 parameter 단일 경로.
+              On empty ``best_move`` writes ``ai_suggested_move = "게임 종료"`` to ``ui_control``
+              and returns (game-over branch).
             - Sends an action goal to ``move_chess_piece`` and waits up to
               ``ROBOT_ACTION_RESULT_TIMEOUT_SEC`` (=180 s) for the result.
             - In the ``finally`` block: writes ``ui_control.working = False`` and transitions
@@ -666,9 +649,9 @@ class MainController(Node):
                 board_dict = self._wait_for_board_state(VISION_RECEIVE_TIMEOUT_SEC)
                 self.get_logger().info("[UI] Using board_state for stockfish/robot (APPROVED).")
 
-            depth, difficulty, turn = self.fb.get_chess_system_params(CHESS_SYSTEM_PATH)
-
-            best_move = self._call_stockfish(board_dict, depth, difficulty, turn)
+            # sub-phase D3: 엔진 설정값은 stockfish 노드 parameter 단일 경로. UI가
+            # set_parameters로 미리 설정한 값을 stockfish가 직접 읽어 사용.
+            best_move = self._call_stockfish(board_dict)
             if not best_move:
                 # ✅ GAME OVER 처리: best_move가 없으면 UI에 '게임 종료' 표시 후 종료 루틴으로 빠짐
                 self.get_logger().error("No best_move from stockfish.")
@@ -718,16 +701,16 @@ class MainController(Node):
                 self._verification = False
             self._publish_ui_status()
 
-    def _call_stockfish(self, board_dict: dict, depth: int, difficulty: int, turn: str) -> str:
+    def _call_stockfish(self, board_dict: dict) -> str:
+        # sub-phase D3: 엔진 설정값(depth/skill_level/turn)은 stockfish 노드 parameter로
+        # 일원화. srv는 보드 데이터만 전달.
         if not self.ai_client.wait_for_service(timeout_sec=SERVICE_TIMEOUT_SEC):
             self.get_logger().error("Stockfish service not available.")
             return ""
 
         req = StockfishMove.Request()
         req.pieces_data = json.dumps(board_dict)
-        req.depth = int(depth)
-        req.skill_level = int(difficulty)
-        req.turn = str(turn)
+        req.last_move = ""
 
         future = self.ai_client.call_async(req)
 

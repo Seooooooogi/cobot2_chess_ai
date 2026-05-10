@@ -125,9 +125,9 @@
     const app = initializeApp(firebaseConfig);
     const db = getDatabase(app);
 
-    // ui_control + chess_system은 sub-phase D에서 ROS2로 전환 — 현재 Firebase 유지
+    // ui_control은 sub-phase E에서 ROS2로 전환 — 현재 Firebase 유지 (additive).
+    // chess_system은 sub-phase D3에서 stockfish 노드 ROS2 parameter로 이전 완료.
     const controlRef = ref(db, "chess/ui_control");
-    const chessSystemRef = ref(db, "chess/chess_system");
 
     // Phase 5 sub-phase C: board_state는 rosbridge 경유 ROS2 토픽 구독
     // file:// URL일 때 hostname이 비어 있으면 localhost로 fallback
@@ -136,6 +136,9 @@
     ros.on("connection", () => {
       console.log(`[ros] connected to ws://${rosbridgeHost}:9090`);
       $("#status").text("ROS2 연결됨 — 카메라 실시간 인식 대기");
+      // sub-phase D3: 연결 후 슬라이더 기본값을 stockfish parameter로 push.
+      // 호출이 페이지 로드 즉시면 rosbridge 연결 전 큐잉되어 silent failure 위험.
+      pushChessSystem();
     });
     ros.on("error", (err) => {
       console.error("[ros] error:", err);
@@ -254,23 +257,49 @@
       return newPos;
     }
 
+    // Phase 5 sub-phase D3: chess_system Firebase write 대체.
+    // stockfish 노드(/chess_ai_node)의 ROS2 parameter (depth, skill_level, default_turn)를
+    // rosbridge SetParameters 표준 service로 직접 설정.
+    // ParameterType 상수 (rcl_interfaces/msg/ParameterType): INTEGER=2, STRING=4.
+    const stockfishSetParamsService = new ROSLIB.Service({
+      ros: ros,
+      name: "/chess_ai_node/set_parameters",
+      serviceType: "rcl_interfaces/srv/SetParameters",
+    });
+
     function pushChessSystem() {
       const depth = parseInt($("#depthRange").val(), 10);
       const difficulty = parseInt($("#difficultyRange").val(), 10);
       const turn = $('input[name="turn"]:checked').val();
 
-      update(chessSystemRef, {
-        depth: depth,
-        difficulty: difficulty,
-        turn: turn,
-        updated_at: new Date().toISOString()
+      const request = new ROSLIB.ServiceRequest({
+        parameters: [
+          { name: "depth", value: { type: 2, integer_value: depth } },
+          { name: "skill_level", value: { type: 2, integer_value: difficulty } },
+          { name: "default_turn", value: { type: 4, string_value: turn } },
+        ],
+      });
+      stockfishSetParamsService.callService(request, (response) => {
+        const results = response.results || [];
+        const failed = results.filter((r) => !r.successful);
+        if (failed.length > 0) {
+          const reasons = failed.map((r) => r.reason).join("; ");
+          console.warn(`[set_parameters] some rejected: ${reasons}`);
+          $("#status").text(`엔진 설정 거부: ${reasons}`);
+        } else {
+          console.log(`[set_parameters] ok: depth=${depth} skill=${difficulty} turn=${turn}`);
+        }
+      }, (error) => {
+        console.error("[set_parameters] service call failed:", error);
+        $("#status").text(`stockfish parameter 설정 실패: ${error}`);
       });
     }
 
     $("#depthRange").on("input", e => { $("#depthVal").text(e.target.value); pushChessSystem(); });
     $("#difficultyRange").on("input", e => { $("#difficultyVal").text(e.target.value); pushChessSystem(); });
     $('input[name="turn"]').on("change", () => { pushChessSystem(); });
-    pushChessSystem();
+    // sub-phase D3: 페이지 로드 직후의 즉시 push는 ros.on("connection") 콜백으로 이동.
+    // rosbridge 미연결 상태의 silent failure 방지.
 
     function stopWorkingAnimation() {
       workingOn = false;

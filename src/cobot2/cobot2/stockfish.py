@@ -5,14 +5,21 @@ Role:
     converts it to FEN, and returns Stockfish's best move.
 
 ROS2 Interfaces:
-    Server: Service ``StockfishMove`` (cobot2_interfaces/StockfishMove) (line 73)
+    Server: Service ``StockfishMove`` (cobot2_interfaces/StockfishMove)
+    Server: Service ``reset_chess_state`` (std_srvs/Trigger)
+    ROS2 parameters (Phase 5 sub-phase D3, Web UI가 rosbridge set_parameters로 설정):
+        - ``depth`` (int, 1–30, default 15)            — Stockfish search depth.
+        - ``skill_level`` (int, 0–20, default 10)      — Stockfish skill level.
+        - ``default_turn`` (string, "w" or "b", default "w") — AI가 두는 색상.
+        Range validation은 ``add_on_set_parameters_callback``에서 수행. 위반 시 set 실패.
+        엔진은 항상 이 parameter 값을 사용 — StockfishMove.srv는 보드 데이터만 전달.
 
 Internal State:
-    - ``self.stockfish``  — ``Stockfish(path=STOCKFISH_PATH)`` instance, or ``None`` if engine binary missing (line 64-67).
-    - ``self.dict_memory`` — last board dict used to infer ``last_move`` for en-passant heuristics (line 69; ``dict_to_fen`` line 114-129).
+    - ``self.stockfish``  — ``Stockfish(path=STOCKFISH_PATH)`` instance, or ``None`` if engine binary missing.
+    - ``self.dict_memory`` — last board dict used to infer ``last_move`` for en-passant heuristics.
 
 External Dependencies:
-    - Stockfish binary at ``$STOCKFISH_PATH`` (env var, default ``/usr/games/stockfish``, line 38)
+    - Stockfish binary at ``$STOCKFISH_PATH`` (env var, default ``/usr/games/stockfish``)
     - ``stockfish`` PyPI library
     - ``cobot2_interfaces.srv.StockfishMove``
 
@@ -28,7 +35,9 @@ import os
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_services_default
+from rcl_interfaces.msg import SetParametersResult
 
 from stockfish import Stockfish
 
@@ -48,6 +57,12 @@ CHESS_AI_STATE_PATH = os.path.expanduser(
 DEFAULT_SKILL_LEVEL = 10
 DEFAULT_DEPTH = 15
 DEFAULT_TURN = "w"
+
+# ROS2 parameter range validation (sub-phase D3).
+# Stockfish 라이브러리 원래 범위 그대로. sentinel 설계 폐기로 0도 자연 허용.
+DEPTH_MIN, DEPTH_MAX = 1, 30
+SKILL_LEVEL_MIN, SKILL_LEVEL_MAX = 0, 20
+VALID_TURNS = ("w", "b")
 # ===================================================================
 
 
@@ -72,6 +87,13 @@ class AIMoveServiceNode(Node):
 
         self._load_state()
 
+        # Phase 5 sub-phase D3: engine config를 ROS2 parameter로 노출 (Web UI →
+        # rosbridge set_parameters). Range validation은 _on_set_parameters_callback.
+        self.declare_parameter("depth", DEFAULT_DEPTH)
+        self.declare_parameter("skill_level", DEFAULT_SKILL_LEVEL)
+        self.declare_parameter("default_turn", DEFAULT_TURN)
+        self.add_on_set_parameters_callback(self._on_set_parameters)
+
         self.srv = self.create_service(
             StockfishMove,
             SERVICE_NAME,
@@ -85,6 +107,29 @@ class AIMoveServiceNode(Node):
             qos_profile=qos_profile_services_default,
         )
         self.get_logger().info(f"Stockfish service ready: {SERVICE_NAME}")
+
+    def _on_set_parameters(self, params):
+        """ROS2 parameter set 검증 콜백.
+
+        UI(rosbridge)에서 set_parameters 호출 시 트리거. depth/skill_level 정수
+        범위, default_turn 'w'/'b' 검증. 위반 시 successful=False로 거부 + 노드
+        로그 — Rule 7 (silent failure 방지).
+        """
+        for p in params:
+            reason = None
+            if p.name == "depth":
+                if p.type_ != Parameter.Type.INTEGER or not (DEPTH_MIN <= p.value <= DEPTH_MAX):
+                    reason = f"depth out of range [{DEPTH_MIN}, {DEPTH_MAX}]: got {p.value}"
+            elif p.name == "skill_level":
+                if p.type_ != Parameter.Type.INTEGER or not (SKILL_LEVEL_MIN <= p.value <= SKILL_LEVEL_MAX):
+                    reason = f"skill_level out of range [{SKILL_LEVEL_MIN}, {SKILL_LEVEL_MAX}]: got {p.value}"
+            elif p.name == "default_turn":
+                if p.type_ != Parameter.Type.STRING or p.value not in VALID_TURNS:
+                    reason = f"default_turn must be one of {VALID_TURNS}: got {p.value!r}"
+            if reason is not None:
+                self.get_logger().warn(f"parameter set rejected: {reason}")
+                return SetParametersResult(successful=False, reason=reason)
+        return SetParametersResult(successful=True)
 
     def dict_to_fen(self, pieces_dict, turn):
         """Convert a board dict to a FEN string.
@@ -232,9 +277,11 @@ class AIMoveServiceNode(Node):
 
             pieces_dict = json.loads(request.pieces_data) if request.pieces_data else {}
 
-            skill_level = int(request.skill_level) if int(request.skill_level) > 0 else DEFAULT_SKILL_LEVEL
-            depth = int(request.depth) if int(request.depth) > 0 else DEFAULT_DEPTH
-            turn = request.turn if request.turn in ["w", "b"] else DEFAULT_TURN
+            # Phase 5 sub-phase D3: 엔진 설정값 단일 경로 — ROS2 parameter만 사용.
+            # StockfishMove.srv는 보드 데이터만 전달. depth/skill_level/turn 필드 폐기.
+            skill_level = int(self.get_parameter("skill_level").value)
+            depth = int(self.get_parameter("depth").value)
+            turn = str(self.get_parameter("default_turn").value)
 
             # On first call (empty history): clamp persisted "KQkq" to what the
             # current position can actually support (prevents invalid FEN when

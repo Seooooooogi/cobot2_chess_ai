@@ -1,10 +1,14 @@
+# StockfishMove — chess engine query service.
+#
+# Phase 5 sub-phase D3 (2026-05-10) — sentinel 설계 폐기, parameter 단일 경로.
+#   엔진 설정값 (depth, skill_level, default_turn)은 stockfish 노드의 ROS2
+#   parameter 단일 경로로만 관리 — UI가 rosbridge SetParameters로 설정.
+#   srv 인터페이스는 보드 데이터만 전달하는 깨끗한 형태로 단순화.
+
 # Request
-string pieces_data       # JSON string: {"A1":"WR", "B3":"WP", ...}
-string turn             # "w" or "b"
-string last_move        # "E2E4"
-int32 skill_level       # Stockfish skill level (0-20)
-int32 depth             # Search depth (0~30 정도가 적당)
+string pieces_data       # JSON: {"A1":"WR", "B3":"WP", ...}
+string last_move         # e.g., "E2E4" (en-passant 추론용; 비어있으면 dict_memory diff로 추론)
 ---
 # Response
-string best_move        # e.g., "a2a4" or "a7a8q"
+string best_move         # e.g., "a2a4" 또는 "a7a8q" (promotion). 빈 문자열이면 게임 종료.
 bool success
