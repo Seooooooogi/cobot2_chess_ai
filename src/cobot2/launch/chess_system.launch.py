@@ -22,44 +22,54 @@ def generate_launch_description():
     ros2 launch cobot2 chess_system.launch.py
     """
 
+    # 노드명은 각 노드의 ``super().__init__(...)`` 코드 값을 single source of truth로
+    # 사용한다. launch ``name=`` 오버라이드는 의도적으로 제거 (Phase 6-0 baseline 발견
+    # PB-1~3 RESOLVED, 2026-05-10):
+    #   - chess_ai_node (stockfish)
+    #   - vision_db
+    #   - robot_action_server
+    #   - main_controller
+    #   - game_logger
+    # ``~/topic`` 사설 네임스페이스 + 토픽/서비스 화이트리스트가 모두 코드 노드명에
+    # 정렬되도록 유지. 변경 시 docstring + UI.html + game_logger 구독 경로도 동기화.
     return LaunchDescription([
-        # 1. Stockfish AI Node
+        # 1. Stockfish AI Node → /chess_ai_node
         Node(
             package='cobot2',
             executable='stockfish',
-            name='stockfish_node',
             output='screen',
             respawn=True,
         ),
 
-        # 2. CV Chess Recognition Node
+        # 2. CV Chess Recognition Node → /vision_db
+        #    publisher: /vision/board_state (절대 경로 — namespace-relative).
         Node(
             package='cobot2',
             executable='object',
-            name='cv_chess_recognition_node',
             output='screen',
             respawn=True,
         ),
 
-        # 3. Robot Control Action Server
+        # 3. Robot Control Action Server → /robot_action_server
+        #    ActionServer: /move_chess_piece (절대 경로). reset Service: /robot_action_server/reset.
         Node(
             package='cobot2',
             executable='robotaction',
-            name='moving_chess_piece_node',
             output='screen',
             respawn=True,
         ),
 
-        # 4. Chess Integration Node
+        # 4. Chess Integration Node → /main_controller
+        #    Publishers: ~/ui_status, ~/game_event (사설 네임스페이스).
+        #    Services:   ~/start_sampling, ~/user_decision.
         Node(
             package='cobot2',
             executable='main',
-            name='chess_integration_node',
             output='screen',
             respawn=True,
         ),
 
-        # 5. Game Logger — SQLite append-only audit log (Phase 5 sub-phase E)
+        # 5. Game Logger → /game_logger
         # 구독: /main_controller/game_event + /main_controller/ui_status + /vision/board_state.
         # DB: env CHESS_AI_LOG_DB_PATH > 기본 ~/.local/share/cobot2_chess_ai/game_log.db.
         # respawn=True — DB write 실패 시 노드는 ERROR 로그만 남기고 계속 동작하지만
@@ -67,7 +77,6 @@ def generate_launch_description():
         Node(
             package='cobot2',
             executable='gamelogger',
-            name='game_logger',
             output='screen',
             respawn=True,
         ),
