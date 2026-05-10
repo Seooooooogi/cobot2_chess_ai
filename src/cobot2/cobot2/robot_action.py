@@ -38,8 +38,15 @@ Issues (Phase 1-1 doc Node 3):
     - RESOLVED R1-1: module-level ``gripper = RG(...)`` removed (2026-05-01) — moved into
       ``MovingChessPiece._init_gripper`` with ``ROBOT_MODE`` branch + ``is_socket_open()`` guard.
     - ~~IMPORTANT R1-2: ``goal_callback`` accepts unconditionally — no command validation → Rule 7.~~ **RESOLVED 2026-05-04**: ``_validate_goal`` (line 428) implements V1-V13 (UCI 형식, pieces_dict 무결성, from_pos 피스 존재·코드, 동시성). HARD REJECT 시 robot/gripper 미동작 보장 (Rule 9 모션 전 차단).
-    - IMPORTANT R1-3: ``TOOLCHARGER_IP/PORT`` hardcoded → Rule 8 (should be a node parameter).
-    - IMPORTANT R1-4: no E-stop / failsafe path on Modbus disconnect → Rule 9.
+    - DEFERRED R1-3: ``TOOLCHARGER_IP/PORT`` hardcoded — kept by user decision (2026-05-10):
+      single-host + fixed gripper IP scenario, env-ization cost > benefit. Revisit at Phase 6 multi-host.
+    - RESOLVED R1-4 (2026-05-10): layered failsafe (Rule 9 명시).
+      L0 = teach pendant hardware E-stop (operator-driven, motor cutoff, always available).
+      L1 = software failsafe — Modbus disconnect detection → DR_init ``set_safety_mode(RECOVERY, STOP)``
+      (Option 1 STOP + Option 3 HOLD fallback: motion halt with servo retained). Triggers:
+      grip/release pymodbus exception, status polling timeout (5.0s), pre-flight ping fail (D).
+      Recovery: ``~/reset`` (std_srvs/Trigger) — manual operator-initiated re-init (B1).
+      Virtual fault injection (V2): ``GRIPPER_FAULT_MODE`` env routes ``MockGripper`` for testing.
     - ~~IMPORTANT R1-5: action server QoS not declared → Rule 4.~~ **RESOLVED 2026-05-04**: 5종 QoS 명시 (goal/result/cancel/feedback = ``qos_profile_services_default``, status = ``qos_profile_action_status_default``).
     # verify needed (Phase 1-1 line 156): ``dsr_robot_node`` is not added to the executor — does DR_init
         function correctly when its bound node is never spun?
@@ -53,6 +60,8 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_services_default, qos_profile_action_status_default
 
+from std_srvs.srv import Trigger
+
 import DR_init
 import time
 from .onrobot import RG
@@ -64,6 +73,70 @@ import threading
 from datetime import datetime
 
 from cobot2_interfaces.action import MoveChessPiece # 커스텀 액션 임포트
+
+
+class FailsafeError(RuntimeError):
+    """R1-4: raised when L1 failsafe (Modbus disconnect) has been triggered.
+
+    Caller (``execute_callback``) must mark the action server degraded and ABORT.
+    Distinct from generic exceptions so non-failsafe errors don't trigger degraded mode.
+    """
+
+
+# R1-4 bounded safety-mode call timeout (s). DSR_ROBOT2.set_safety_mode wraps
+# wait_for_service WITHOUT a timeout — if the M0609 controller is unreachable the
+# call hangs forever (Rule 7 silent-fail). Daemon-thread + join(timeout) ensures
+# _enter_failsafe / restore_safety_mode always return within bounded time.
+# Nominal ROS2 service round-trip is sub-100ms; 2.0s catches deadlocks without
+# delaying legitimate fault response.
+_SAFETY_CALL_TIMEOUT_SEC = 2.0
+
+
+class MockGripper:
+    """R1-4 V2: fault-injectable virtual gripper for failsafe testing.
+
+    Activated when ``ROBOT_MODE == "virtual"`` AND ``GRIPPER_FAULT_MODE`` env is set.
+    Exposes the subset of ``onrobot.RG`` API that ``MovingChessPiece`` calls.
+
+    Fault modes (env value):
+        - ``ping_fail``           — ``is_socket_open()`` returns False (pre-flight ping fails)
+        - ``disconnect_on_grip``  — ``close_gripper()`` raises ConnectionException
+        - ``disconnect_on_release`` — ``open_gripper()`` raises ConnectionException
+        - ``disconnect_on_status`` — ``get_status()`` raises ConnectionException
+        - ``hang_on_status``      — ``get_status()`` always returns busy=True (timeout test)
+        - any other / unset       — behaves as no-op virtual gripper (matches legacy ``None``)
+    """
+
+    def __init__(self, fault_mode: str, log_fn):
+        self.fault_mode = fault_mode
+        self._log = log_fn
+        self._log(f"[MOCK] MockGripper instantiated (fault_mode={fault_mode!r})")
+
+    def _maybe_raise(self, trigger: str):
+        if self.fault_mode != trigger:
+            return
+        try:
+            from pymodbus.exceptions import ConnectionException
+            raise ConnectionException(f"MockGripper fault: {trigger}")
+        except ImportError:
+            raise ConnectionError(f"MockGripper fault: {trigger}")
+
+    def is_socket_open(self) -> bool:
+        return self.fault_mode != "ping_fail"
+
+    def close_gripper(self):
+        self._log("[MOCK] close_gripper")
+        self._maybe_raise("disconnect_on_grip")
+
+    def open_gripper(self):
+        self._log("[MOCK] open_gripper")
+        self._maybe_raise("disconnect_on_release")
+
+    def get_status(self):
+        self._maybe_raise("disconnect_on_status")
+        if self.fault_mode == "hang_on_status":
+            return [True]
+        return [False]
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
@@ -106,8 +179,16 @@ class MovingChessPiece:
         - In virtual mode, no hardware contact.
     """
 
-    def __init__(self, logger_node: Node):
+    def __init__(self, logger_node: Node, grip_status_timeout_sec: float = 5.0):
+        """R1-4 / Rule 8: ``grip_status_timeout_sec`` injected from caller's ROS2
+        parameter (RobotActionServer ``grip_status_timeout_sec``). Default 5.0s
+        applies if instantiated outside the action server (tests / scripts).
+
+        RG2 close/open completes < 1s nominally; 5.0s catches Modbus stalls
+        without slowing legitimate motion.
+        """
         self.logger_node = logger_node
+        self._grip_status_timeout_sec = grip_status_timeout_sec
 
         self.vel = 60
         self.acc = 60
@@ -135,7 +216,8 @@ class MovingChessPiece:
         """Initialize the RG2 gripper based on ``ROBOT_MODE``.
 
         Returns:
-            ``RG`` instance in real mode, ``None`` in virtual mode.
+            ``RG`` in real mode. ``MockGripper`` in virtual mode if ``GRIPPER_FAULT_MODE``
+            env is set (R1-4 V2). ``None`` in virtual mode otherwise (legacy).
 
         Raises:
             RuntimeError — if real mode and ``rg.client.is_socket_open()`` is False
@@ -146,6 +228,10 @@ class MovingChessPiece:
             (``192.168.1.1:502``).
         """
         if ROBOT_MODE == "virtual":
+            fault_mode = os.getenv("GRIPPER_FAULT_MODE", "")
+            if fault_mode:
+                self.log(f"[VIRTUAL] Routing to MockGripper (GRIPPER_FAULT_MODE={fault_mode})")
+                return MockGripper(fault_mode, self.log)
             self.log("[VIRTUAL] Skipping RG2 Modbus connect")
             return None
 
@@ -163,6 +249,133 @@ class MovingChessPiece:
             )
         self.log(f"[REAL] RG2 gripper connected")
         return rg
+
+    def check_modbus_alive(self) -> bool:
+        """R1-4 D: pre-flight gripper liveness check (called from goal_callback).
+
+        # verify needed: ``is_socket_open()`` reads pymodbus connection state
+        without performing network I/O — expected non-blocking. If pymodbus
+        version drift introduces blocking behavior here, ``goal_callback`` becomes
+        blocking too (Rule 2 violation). Phase 6 검증 시 timing 측정.
+
+        Returns:
+            True if virtual mode (no Modbus), or socket open. False on disconnect /
+            exception / MockGripper ``ping_fail`` mode.
+        """
+        if self.gripper is None:
+            return True
+        try:
+            return bool(self.gripper.is_socket_open())
+        except Exception as e:
+            self.log(f"[FAILSAFE] Modbus liveness check exception: {e}")
+            return False
+
+    def reconnect_gripper(self) -> tuple[bool, str]:
+        """R1-4 B1: called by ``~/reset`` Service to recover from L1 failsafe.
+
+        In virtual mode, re-instantiates (clears MockGripper state). In real mode,
+        re-opens the Modbus socket via ``_init_gripper``. Caller decides whether to
+        clear the degraded flag based on the returned tuple.
+
+        Side effect: clears ``self.gripper`` to None before re-init so a subsequent
+        failure leaves a known-empty state rather than a stale broken instance.
+        """
+        # MINOR fix: clear stale reference first.
+        self.gripper = None
+        try:
+            self.gripper = self._init_gripper()
+            if ROBOT_MODE == "virtual":
+                return True, "virtual gripper reset"
+            return True, f"gripper reconnected at {TOOLCHARGER_IP}:{TOOLCHARGER_PORT}"
+        except Exception as e:
+            return False, f"reconnect failed: {type(e).__name__}: {e}"
+
+    def _call_safety_mode_bounded(self, safety_mode: int, safety_event: int, label: str) -> bool:
+        """R1-4 helper: invoke DR_init ``set_safety_mode`` with hard timeout.
+
+        Vendored ``DSR_ROBOT2.set_safety_mode`` (line 2031) contains an unbounded
+        ``wait_for_service`` loop. Daemon thread + ``join(timeout)`` ensures the
+        caller always returns within ``_SAFETY_CALL_TIMEOUT_SEC`` regardless of
+        controller reachability — preserving Rule 7 fail-loud semantics.
+
+        Returns True on completed call, False on timeout / exception (logged).
+
+        # verify needed: actual round-trip latency on real M0609. Virtual DRCF
+        emulator may not honor set_safety_mode at all (Phase 6 실기 검증 항목).
+        """
+        outcome = {"completed": False, "error": None}
+
+        def _worker():
+            try:
+                from DSR_ROBOT2 import set_safety_mode
+                set_safety_mode(safety_mode, safety_event)
+                outcome["completed"] = True
+            except Exception as e:
+                outcome["error"] = e
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=_SAFETY_CALL_TIMEOUT_SEC)
+
+        if t.is_alive():
+            self.log(f"[FAILSAFE] set_safety_mode({label}) TIMEOUT after "
+                     f"{_SAFETY_CALL_TIMEOUT_SEC}s — controller unreachable. "
+                     f"Hardware E-stop (L0) remains the operator's recourse.")
+            return False
+        if outcome["error"] is not None:
+            self.log(f"[FAILSAFE] set_safety_mode({label}) EXCEPTION: "
+                     f"{type(outcome['error']).__name__}: {outcome['error']}")
+            return False
+        return True
+
+    def _enter_failsafe(self, reason: str):
+        """R1-4 L1: motion STOP + servo HOLD via DR_init ``set_safety_mode``.
+
+        L0 (teach pendant hardware E-stop) is operator-driven and independent of this
+        path — this method is the software graceful-degradation layer, not the
+        catastrophic-safety layer (Rule 9 명시).
+
+        Recovery: physical board check → ``~/reset`` Service.
+
+        Notes:
+            ``set_safety_mode(SAFETY_MODE_RECOVERY=2, SAFETY_MODE_EVENT_STOP=2)`` —
+            see ``DSR_ROBOT2.py`` line 2016 / ``DRFC.py`` line 127-141.
+            Bounded call via ``_call_safety_mode_bounded`` to prevent indefinite hang
+            when M0609 controller is also unreachable.
+        """
+        self.log(f"[FAILSAFE] L1 entry — {reason}")
+        try:
+            from DRFC import SAFETY_MODE_RECOVERY, SAFETY_MODE_EVENT_STOP
+            self._call_safety_mode_bounded(
+                SAFETY_MODE_RECOVERY, SAFETY_MODE_EVENT_STOP, "RECOVERY+STOP"
+            )
+        except ImportError as e:
+            self.log(f"[FAILSAFE] DRFC import failed: {e} — safety mode call skipped")
+        self.log("[FAILSAFE] Motion stop requested, servo retained. "
+                 "Recovery: hardware E-stop (L0) if unsafe, else ~/reset Service after board check.")
+
+    def restore_safety_mode(self) -> tuple[bool, str]:
+        """R1-4 B1: attempt to transition safety mode RECOVERY → AUTONOMOUS as part of reset.
+
+        # verify needed: M0609 may require teach pendant manual confirmation
+        (E-stop reset / mode key) before software AUTONOMOUS entry succeeds.
+        Software call alone may not be sufficient — operator should clear safety
+        state on the pendant before invoking ``~/reset``. Phase 6 실기 검증 항목.
+
+        Returns (called_ok, message). False does not necessarily mean unsafe —
+        operator may need pendant interaction first.
+        """
+        try:
+            from DRFC import SAFETY_MODE_AUTONOMOUS, SAFETY_MODE_EVENT_ENTER
+        except ImportError as e:
+            return False, f"DRFC import failed: {e}"
+        ok = self._call_safety_mode_bounded(
+            SAFETY_MODE_AUTONOMOUS, SAFETY_MODE_EVENT_ENTER, "AUTONOMOUS+ENTER"
+        )
+        if ok:
+            return True, "safety mode restored to AUTONOMOUS"
+        return False, ("safety mode restore TIMEOUT or FAILED — "
+                       "verify on teach pendant (manual reset may be required)")
 
     def log(self, msg: str):
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -214,9 +427,12 @@ class MovingChessPiece:
         if self.gripper is None:
             self.log("[VIRTUAL] grip (no-op)")
             return
-        self.gripper.close_gripper()
-        while self.gripper.get_status()[0]:
-            time.sleep(0.25)
+        try:
+            self.gripper.close_gripper()
+            self._wait_gripper_idle("grip")
+        except Exception as e:
+            self._enter_failsafe(f"grip(): {type(e).__name__}: {e}")
+            raise FailsafeError(f"grip(): {e}") from e
 
     # (0,1):50mm
 
@@ -224,8 +440,37 @@ class MovingChessPiece:
         if self.gripper is None:
             self.log("[VIRTUAL] release (no-op)")
             return
-        self.gripper.open_gripper()
+        try:
+            self.gripper.open_gripper()
+            self._wait_gripper_idle("release")
+        except Exception as e:
+            self._enter_failsafe(f"release(): {type(e).__name__}: {e}")
+            raise FailsafeError(f"release(): {e}") from e
+
+    def _wait_gripper_idle(self, op_label: str):
+        """R1-4: poll ``get_status()[0]`` until idle, with parameter-driven timeout.
+
+        Original loop had no timeout — pymodbus 2.x can hang or return stale truthy
+        values on degraded connections. Timeout converts indefinite hang into
+        ``TimeoutError`` so caller's ``_enter_failsafe`` path engages.
+
+        # verify needed (MINOR): the deadline is checked between ``get_status()``
+        calls. If pymodbus ``get_status()`` itself hangs on a half-open socket the
+        deadline is never reached. pymodbus has a default socket-level timeout but
+        it is not explicitly configured by ``onrobot.RG``. Real-mode behavior
+        pending Phase 6 검증; consider explicit ``client.set_timeout`` if needed
+        (touches R1-3 onrobot wrapper territory).
+
+        Raises:
+            TimeoutError — polling exceeds ``_grip_status_timeout_sec``.
+            Exception — pymodbus / socket error from ``get_status()`` (caller wraps).
+        """
+        deadline = time.monotonic() + self._grip_status_timeout_sec
         while self.gripper.get_status()[0]:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"{op_label} status polling exceeded {self._grip_status_timeout_sec}s"
+                )
             time.sleep(0.25)
 
     def calculate(self):
@@ -394,9 +639,13 @@ class RobotActionServer(Node):
 
     def __init__(self):
         super().__init__('robot_action_server')
-        
+
+        # Rule 8: hardware-dependent timing exposed as ROS2 parameter.
+        self.declare_parameter('grip_status_timeout_sec', 5.0)
+        grip_timeout = self.get_parameter('grip_status_timeout_sec').value
+
         # 로직 클래스 초기화
-        self.chess_mover = MovingChessPiece(self)
+        self.chess_mover = MovingChessPiece(self, grip_status_timeout_sec=grip_timeout)
         
         # 액션 서버 설정 (Rule 4: QoS 명시 — rclpy 기본값과 동일하나 의도 명시)
         self._action_server = ActionServer(
@@ -424,6 +673,21 @@ class RobotActionServer(Node):
         # R1-2 V12: 동시 실행 추적. _is_executing 은 _execution_lock 으로 보호.
         self._execution_lock = threading.Lock()
         self._is_executing = False
+
+        # R1-4 L1 failsafe state. _degraded means subsequent goals are REJECTed
+        # until ``~/reset`` Service is called.
+        self._degraded_lock = threading.Lock()
+        self._degraded = False
+        self._degraded_reason = ""
+
+        # R1-4 B1: manual recovery Service (Trigger). Resolved name: ``~/reset``
+        # → ``/robot_action_server/reset`` (Rule 5 — owned by this node).
+        self._reset_srv = self.create_service(
+            Trigger,
+            '~/reset',
+            self._reset_callback,
+            qos_profile=qos_profile_services_default,
+        )
 
     def _validate_goal(self, goal_request) -> tuple[bool, str]:
         """Validate MoveChessPiece goal before accepting (R1-2 / Rule 7+9).
@@ -492,31 +756,121 @@ class RobotActionServer(Node):
         if target is not None and target not in VALID_PIECES:
             return False, f"V11: unknown piece code '{target}' at {to_sq}"
 
-        # V12: concurrent goal check (lock-protected)
-        with self._execution_lock:
-            if self._is_executing:
-                return False, "V12: concurrent goal in progress (previous execute_callback not done)"
+        # V12 (concurrent goal) intentionally moved out of _validate_goal to
+        # ``goal_callback`` — must be atomic claim-and-set, not check-then-act.
 
         return True, ""
 
     def goal_callback(self, goal_request):
-        """액션 목표 수락 여부 결정 (R1-2 RESOLVED — _validate_goal V1-V13).
+        """액션 목표 수락 여부 결정 (R1-2 V1-V13 + R1-4 F1/F2 + V12 atomic claim).
 
         REJECT 시 robot/gripper 미동작 (Rule 9: 모션 전 차단).
-        V12 (concurrent) → WARN, 그 외 → ERROR.
+        Order: F1 (degraded) → V1-V11+V13 → F2 (Modbus ping) → V12 (atomic claim).
+        V12 must be the LAST gate — atomic claim-and-set under ``_execution_lock``
+        prevents the TOCTOU race where two concurrent callbacks both observe
+        ``_is_executing=False`` and both ACCEPT.
+        ``execute_callback`` clears the slot in its ``finally`` block.
         """
+        log = self.get_logger()
+        cmd_repr = repr(goal_request.command)
+
+        # F1: degraded mode REJECT (B1 manual reset required).
+        with self._degraded_lock:
+            if self._degraded:
+                log.error(
+                    f"Goal REJECTED [F1: degraded — {self._degraded_reason}]. "
+                    f"Call ~/reset Service to recover. command={cmd_repr}"
+                )
+                return GoalResponse.REJECT
+
+        # V1-V11, V13 (V12 moved below for atomic semantics).
         is_valid, reason = self._validate_goal(goal_request)
         if not is_valid:
-            cmd_repr = repr(goal_request.command)
-            log = self.get_logger()
-            if reason.startswith("V12:"):
-                log.warn(f"Goal REJECTED [{reason}]. command={cmd_repr}")
-            else:
-                log.error(f"Goal REJECTED [{reason}]. command={cmd_repr}")
+            log.error(f"Goal REJECTED [{reason}]. command={cmd_repr}")
             return GoalResponse.REJECT
 
-        self.get_logger().info(f"Goal ACCEPTED: command={goal_request.command!r}")
+        # F2: pre-flight Modbus ping (D). Failure auto-enters L1 failsafe so
+        # next goal also REJECTs at F1 until manual reset.
+        if not self.chess_mover.check_modbus_alive():
+            with self._degraded_lock:
+                self._degraded = True
+                self._degraded_reason = "F2: pre-flight Modbus ping failed"
+            self.chess_mover._enter_failsafe("F2: pre-flight Modbus ping failed")
+            log.error(
+                f"Goal REJECTED [F2: pre-flight Modbus ping failed]. "
+                f"Entered L1 failsafe. command={cmd_repr}"
+            )
+            return GoalResponse.REJECT
+
+        # V12: atomic concurrency claim — last gate before ACCEPT.
+        # Set ``_is_executing=True`` here (not in execute_callback) so a second
+        # concurrent goal_callback observes True and REJECTs.
+        with self._execution_lock:
+            if self._is_executing:
+                log.warn(f"Goal REJECTED [V12: concurrent goal in progress]. command={cmd_repr}")
+                return GoalResponse.REJECT
+            self._is_executing = True
+
+        log.info(f"Goal ACCEPTED: command={cmd_repr}")
         return GoalResponse.ACCEPT
+
+    def _reset_callback(self, request, response):
+        """R1-4 B1: manual recovery from L1 failsafe.
+
+        Two-phase recovery:
+            (1) gripper reconnect — re-open Modbus socket / clear MockGripper state.
+            (2) safety mode restore — ``set_safety_mode(AUTONOMOUS, ENTER)``.
+        Both are required for the next motion goal to succeed: phase (1) restores
+        gripper I/O; phase (2) lifts the M0609 controller out of RECOVERY mode left
+        by ``_enter_failsafe``. Without phase (2) the next ``movel`` is rejected
+        by the controller even though F1/F2/V-checks pass.
+
+        # verify needed: M0609 may require teach pendant manual confirmation
+        before AUTONOMOUS entry succeeds. If phase (2) reports failure / timeout,
+        operator should clear safety state on pendant before retrying ``~/reset``.
+        Phase 6 실기 검증 항목.
+
+        Operator is expected to physically inspect the board / robot before calling.
+        """
+        log = self.get_logger()
+        with self._degraded_lock:
+            if not self._degraded:
+                response.success = True
+                response.message = "not in degraded mode (no-op)"
+                log.info("Reset called but not in degraded mode")
+                return response
+
+            # Phase (1): gripper reconnect.
+            grip_ok, grip_msg = self.chess_mover.reconnect_gripper()
+            if not grip_ok:
+                log.error(f"Reset phase (1) gripper FAILED: {grip_msg}")
+                response.success = False
+                response.message = f"gripper reconnect failed: {grip_msg}"
+                return response
+
+            # Phase (2): safety mode restore — RECOVERY → AUTONOMOUS.
+            safety_ok, safety_msg = self.chess_mover.restore_safety_mode()
+
+            if safety_ok:
+                self._degraded = False
+                self._degraded_reason = ""
+                log.info(f"Reset OK — gripper={grip_msg}; safety={safety_msg}")
+                response.success = True
+                response.message = f"reset OK: {grip_msg}; {safety_msg}"
+            else:
+                # Gripper recovered but safety mode restore inconclusive — DO NOT clear
+                # degraded flag automatically. Operator must verify on teach pendant
+                # and re-call ~/reset, or override via separate Service (future scope).
+                log.warn(
+                    f"Reset phase (2) safety mode unconfirmed: {safety_msg}. "
+                    f"Degraded flag retained. Verify teach pendant + re-call ~/reset."
+                )
+                response.success = False
+                response.message = (
+                    f"gripper OK ({grip_msg}); safety unconfirmed ({safety_msg}); "
+                    f"degraded flag retained — verify pendant"
+                )
+        return response
 
     def cancel_callback(self, goal_handle):
         """액션 취소 요청 처리"""
@@ -524,10 +878,14 @@ class RobotActionServer(Node):
         return CancelResponse.ACCEPT
 
     async def execute_callback(self, goal_handle):
-        """실제 로봇 동작 수행 (V12 enabling: _is_executing set/clear)."""
-        with self._execution_lock:
-            self._is_executing = True
+        """실제 로봇 동작 수행.
 
+        - V12 enabling: ``_is_executing`` was claimed atomically in
+          ``goal_callback`` (R1-2 V12 atomic-fix). This callback only clears it.
+        - R1-4: ``FailsafeError`` (Modbus 단절) → degraded 모드 진입 + ABORT.
+          Generic ``Exception`` → ABORT only (degraded 진입 안 함 — 모션 자체 실패는
+          페일세이프 대상 아님; 통신 장애만 degraded 처리).
+        """
         self.get_logger().info("Executing goal...")
 
         result = MoveChessPiece.Result()
@@ -537,10 +895,19 @@ class RobotActionServer(Node):
 
             goal_handle.succeed()
             result.success = True
+        except FailsafeError as e:
+            self.get_logger().error(f"L1 FAILSAFE during execution: {e}")
+            with self._degraded_lock:
+                self._degraded = True
+                self._degraded_reason = f"L1 failsafe: {e}"
+            goal_handle.abort()
+            result.success = False
+            result.message = "L1 failsafe — recovery via ~/reset"
         except Exception as e:
             self.get_logger().error(f"Task failed: {e}")
             goal_handle.abort()
             result.success = False
+            result.message = f"task failed: {type(e).__name__}: {e}"
         finally:
             with self._execution_lock:
                 self._is_executing = False
