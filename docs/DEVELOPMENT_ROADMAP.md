@@ -14,7 +14,7 @@
 | 1 | Code Mapping | ✅ COMPLETE |
 | 2 | Annotation & Documentation | ✅ COMPLETE |
 | 3 | ~~Virtual Verification~~ | 폐지 → 상시 규율 |
-| 4 | Refactoring (R/S/M/V) | ◐ 17/21 RESOLVED. R1-3, R1-4 OPEN |
+| 4 | Refactoring (R/S/M/V) | ◐ 18/21 RESOLVED. R1-3 DEFERRED. M1-4/M1-5/V1-1 → Phase 5 |
 | 5 | Firebase → rosbridge 마이그레이션 | ⚪ NEW (Phase 4 잔여 RESOLVED 후 진입) |
 | 6 | 실기 검증 `mode:=real` | ⚪ NEW (Phase 5 완료 후 진입) |
 
@@ -69,7 +69,7 @@
 | R1-1 | 모듈 수준 gripper Modbus 연결 | `robot_action.py` | ✅ RESOLVED | `ccff5d0` |
 | R1-2 | goal_callback 검증 부재 (Rule 7) | `robot_action.py` | ✅ RESOLVED | `8c4dcd4` |
 | R1-3 | TOOLCHARGER_IP/PORT 하드코딩 (Rule 8) | `robot_action.py:26-27` | ◐ **DEFERRED** (의식적 유지, 2026-05-10) | — |
-| R1-4 | Modbus 단절 페일세이프 (Rule 9 ⚠) | `robot_action.py` | ⚪ **OPEN** | — |
+| R1-4 | Modbus 단절 페일세이프 (Rule 9 ⚠) | `robot_action.py` | ✅ RESOLVED | `765082c` |
 | R1-5 | 액션 서버 QoS 미명시 (Rule 4) | `robot_action.py` | ✅ RESOLVED | `f6a4955` |
 | R1-8 | 미사용 feedback_msg 제거 | `robot_action.py` | ✅ RESOLVED | `fbacec1` |
 | S1-1 | STOCKFISH_PATH 하드코딩 | `stockfish.py` | ✅ RESOLVED | `bca2bec` |
@@ -89,10 +89,10 @@
 
 해결 17 / 전체 21. 추가 미체크 커밋: `4-voice` voice stack 삭제 (M1-1/M1-6/M1-7 동반 RESOLVED, `90078c5`).
 
-### Phase 4 잔여 (Phase 5 진입 전 처리)
+### Phase 4 잔여
 
-- ~~**R1-3** TOOLCHARGER_IP / TOOLCHARGER_PORT 환경변수화. Rule 8 (확장성) 위반.~~ **DEFERRED 2026-05-10** — 사용자 결정으로 하드코딩 유지. 이유: 단일 호스트 + 고정 그리퍼 IP 시나리오에서 환경변수화 이득 < 변경 비용. Phase 6 실기 다호스트 확장 시 재검토.
-- **R1-4** Modbus 단절 시 페일세이프 (E-stop 또는 hold) 정의. **Rule 9 Tier 0 동급 안전**. 옵션 검토 진행 중 (대화 참조).
+- ~~**R1-3** TOOLCHARGER_IP / TOOLCHARGER_PORT 환경변수화.~~ **DEFERRED 2026-05-10** — 사용자 결정으로 하드코딩 유지. 단일 호스트 + 고정 그리퍼 IP 시나리오에서 환경변수화 이득 < 변경 비용. Phase 6 실기 다호스트 확장 시 재검토.
+- ~~**R1-4** Modbus 단절 페일세이프.~~ **RESOLVED 2026-05-10** (`765082c`) — L0 하드웨어 E-stop + L1 SW 페일세이프 (Option 1 STOP + Option 3 HOLD: `set_safety_mode(RECOVERY, STOP)` bounded). 회복: `~/reset` Service 두 단계 (gripper reconnect + safety mode AUTONOMOUS 복귀). MockGripper로 가상 검증. 실기 검증은 Phase 6.
 
 ### Phase 4 OPEN → Phase 5에서 자동 RESOLVED
 
