@@ -9,12 +9,17 @@ Role:
 ROS2 Interfaces:
     Service: ``~/start_sampling`` (std_srvs/Trigger) — state-change trigger; IDLE→SAMPLING.
              Resolves to /main_controller/start_sampling.
+    Subscriber: Topic ``vision/board_state`` (cobot2_interfaces/msg/BoardState) —
+                RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). Cached latest is used as the
+                board snapshot for SAMPLING and as the live fallback in RUNNING.
     Client: Service ``StockfishMove``      (cobot2_interfaces/StockfishMove)
     Client: Action  ``move_chess_piece``  (cobot2_interfaces/MoveChessPiece)
 
 Timer & Threads:
     - Timer ``_poll_ui_decision`` — 0.2 s, polls Firebase ``ui_control`` for APPROVED / RE-CHECKED
-    - Daemon thread ``_job_make_and_publish_board`` — 5 samples × 1 s + majority vote, spawned in ``_on_start_sampling``
+    - Daemon thread ``_job_make_and_publish_board`` — receives the latched ``vision/board_state``
+      message (TRANSIENT_LOCAL) within ``VISION_RECEIVE_TIMEOUT_SEC``, no resampling/voting
+      (single source of truth from vision node), spawned in ``_on_start_sampling``.
     - Daemon thread ``_job_stockfish_then_robot_then_wakeup`` — service call + action goal, spawned in ``_poll_ui_decision``
 
 External Dependencies:
@@ -25,7 +30,9 @@ Issues (Phase 1-1 doc Node 1):
     - M1-3 RESOLVED 2026-05-01: ``FIREBASE_SERVICE_ACCOUNT_JSON`` env-ized via ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var; ``FIREBASE_DB_URL`` via ``FIREBASE_DATABASE_URL`` env var.
     - M1-1 RESOLVED 2026-05-04: ``~/start_sampling`` (Trigger) 로 대체.
     - ~~M1-2: pub/sub QoS 미명시 (Rule 4)~~ **RESOLVED 2026-05-04**: voice 제거로 pub/sub 0건. service/action endpoint에 ``qos_profile_services_default`` / ``qos_profile_action_status_default`` 명시 (line 234-256).
-    - IMPORTANT M1-4: Firebase serves as vision↔main message bus → ROS2 Rule 7 (external channel as transport).
+    - M1-4 PARTIAL Phase 5 sub-phase B 2026-05-10: vision→main bus migrated to ROS2 topic
+      ``vision/board_state`` (TRANSIENT_LOCAL). UI↔main control flow still on Firebase
+      (``ui_control``, ``chess_system``) — closed in sub-phases C/D.
     - MINOR M1-5: workflow threads use ``time.sleep`` polling on Futures inside ``_call_stockfish`` and ``_send_robot_action_and_wait`` — Future callbacks preferred.
     - M1-6 RESOLVED 2026-05-04: Service 로 대체 — voice_control_node 미실행 무한 대기 해소.
     - M1-7 RESOLVED 2026-05-04: voice_status pub 제거 (옵션 a) — dead pub 해소.
@@ -35,18 +42,25 @@ import json
 import os
 import time
 import threading
-from collections import Counter
 from datetime import datetime
 
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from rclpy.qos import qos_profile_services_default, qos_profile_action_status_default
+from rclpy.qos import (
+    qos_profile_services_default,
+    qos_profile_action_status_default,
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+    HistoryPolicy,
+)
 from std_srvs.srv import Trigger
 
 import firebase_admin
 from firebase_admin import credentials, db
 
+from cobot2_interfaces.msg import BoardState
 from cobot2_interfaces.srv import StockfishMove
 from cobot2_interfaces.action import MoveChessPiece
 
@@ -59,8 +73,10 @@ BOARD_STATE_PATH = "chess/board_state"
 UI_CONTROL_PATH = "chess/ui_control"
 CHESS_SYSTEM_PATH = "chess/chess_system"
 
-SAMPLE_COUNT = 5
-SAMPLE_INTERVAL_SEC = 1.0
+# Phase 5 sub-phase B: vision→main bus is now ROS2 topic (TRANSIENT_LOCAL).
+# Relative topic name (Rule 5); resolves under main_controller's namespace.
+VISION_BOARD_STATE_TOPIC = "vision/board_state"
+VISION_RECEIVE_TIMEOUT_SEC = 3.0
 
 STOCKFISH_SERVICE_NAME = "StockfishMove"
 SERVICE_TIMEOUT_SEC = 20.0
@@ -160,54 +176,6 @@ class FirebaseClient:
         return depth, difficulty, turn
 
 
-class BoardStateSampler:
-    def __init__(self, fb: FirebaseClient, board_state_path: str, sample_count: int, sample_interval_sec: float):
-        self.fb = fb
-        self.board_state_path = board_state_path
-        self.sample_count = int(sample_count)
-        self.sample_interval_sec = float(sample_interval_sec)
-
-    @staticmethod
-    def _majority_vote_dict(dict_list):
-        all_keys = set()
-        for d in dict_list:
-            all_keys.update(d.keys())
-
-        final_dict = {}
-        for k in sorted(all_keys):
-            values = [d[k] for d in dict_list if k in d]
-            if not values:
-                continue
-
-            counter = Counter(values)
-            max_count = max(counter.values())
-            candidates = [v for v, c in counter.items() if c == max_count]
-
-            if len(candidates) == 1:
-                final_dict[k] = candidates[0]
-            else:
-                for d in reversed(dict_list):
-                    if k in d and d[k] in candidates:
-                        final_dict[k] = d[k]
-                        break
-
-        return final_dict
-
-    def sample_final_dict(self, progress_cb=None) -> dict:
-        samples = []
-        for i in range(self.sample_count):
-            d = self.fb.get_board_dict(self.board_state_path)
-            samples.append(d)
-
-            if callable(progress_cb):
-                progress_cb(i + 1, self.sample_count, len(d))
-
-            if i < self.sample_count - 1:
-                time.sleep(self.sample_interval_sec)
-
-        return BoardStateSampler._majority_vote_dict(samples)
-
-
 class MainController(Node):
     """Workflow orchestrator node.
 
@@ -230,7 +198,24 @@ class MainController(Node):
         super().__init__("main_controller")
 
         self.fb = FirebaseClient(FIREBASE_SERVICE_ACCOUNT_JSON, FIREBASE_DB_URL)
-        self.sampler = BoardStateSampler(self.fb, BOARD_STATE_PATH, SAMPLE_COUNT, SAMPLE_INTERVAL_SEC)
+
+        # Vision board_state subscriber (Phase 5 sub-phase B): TRANSIENT_LOCAL latched
+        # so a late-joining subscriber receives the publisher's most recent message.
+        self._latest_board_state: dict | None = None
+        self._latest_board_state_lock = threading.Lock()
+        self._board_state_received_event = threading.Event()
+        board_state_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.board_state_sub = self.create_subscription(
+            BoardState,
+            VISION_BOARD_STATE_TOPIC,
+            self._on_board_state,
+            board_state_qos,
+        )
 
         self.ai_client = self.create_client(
             StockfishMove,
@@ -268,6 +253,40 @@ class MainController(Node):
 
         self.get_logger().info("MainController ready. Service: /main_controller/start_sampling (std_srvs/Trigger).")
 
+    def _on_board_state(self, msg: BoardState) -> None:
+        # Subscriber callback runs on the rclpy executor thread; worker threads consume
+        # the cached value via _wait_for_board_state.
+        if len(msg.squares) != len(msg.pieces):
+            self.get_logger().warn(
+                f"BoardState arrays length mismatch: squares={len(msg.squares)} pieces={len(msg.pieces)} — discarding."
+            )
+            return
+        board = dict(zip(msg.squares, msg.pieces))
+        with self._latest_board_state_lock:
+            self._latest_board_state = board
+        self._board_state_received_event.set()
+
+    def _wait_for_board_state(self, timeout_sec: float) -> dict:
+        """Block until at least one ``BoardState`` message has been received.
+
+        With ``TRANSIENT_LOCAL`` durability the publisher's most recent message is
+        delivered to a late-joining subscriber, so the typical wait is sub-second.
+        Subsequent calls return immediately (Event remains set) with whatever the
+        most recent received message was — vision continues updating
+        ``_latest_board_state`` as new frames arrive.
+
+        Raises:
+            TimeoutError: no message received within ``timeout_sec`` (vision
+                node not running or topic unbound).
+        """
+        if not self._board_state_received_event.wait(timeout=timeout_sec):
+            raise TimeoutError(
+                f"No {VISION_BOARD_STATE_TOPIC} received within {timeout_sec:.1f}s "
+                "(is vision node running?)"
+            )
+        with self._latest_board_state_lock:
+            assert self._latest_board_state is not None
+            return dict(self._latest_board_state)
 
     def _reset_ui_for_new_job(self, job_id: str):
         try:
@@ -314,26 +333,27 @@ class MainController(Node):
         return response
 
     def _job_make_and_publish_board(self, job_id: str):
-        """Worker thread (daemon) — sample board state and publish for user verification.
+        """Worker thread (daemon) — capture board state and publish for user verification.
 
         Args:
             job_id: str — timestamp-based identifier set when SAMPLING was entered.
 
         Side Effects:
-            - Reads Firebase ``chess/board_state`` ``SAMPLE_COUNT`` (=5) times at
-              ``SAMPLE_INTERVAL_SEC`` (=1.0 s) intervals; computes per-square majority vote.
-            - Writes the voted board back to Firebase ``chess/board_state``.
+            - Receives the latched ``vision/board_state`` message (TRANSIENT_LOCAL) within
+              ``VISION_RECEIVE_TIMEOUT_SEC``. Single source of truth from vision node —
+              vision is responsible for any internal smoothing / sample voting.
+            - Writes the captured board back to Firebase ``chess/board_state`` (UI mirror,
+              removed in sub-phase E).
             - Sets ``ui_control.verification = True`` and uploads ``final_board``.
             - On success: transitions ``self._state`` to ``WAIT_DECISION``.
-            - On exception: transitions back to ``IDLE``.
+            - On exception (incl. ``TimeoutError`` if vision is silent): transitions back to ``IDLE``.
         """
         try:
-            self.get_logger().info("[SAMPLING] start: read board_state 5 times (1s interval)")
+            self.get_logger().info(
+                f"[SAMPLING] waiting for {VISION_BOARD_STATE_TOPIC} (timeout={VISION_RECEIVE_TIMEOUT_SEC:.1f}s)"
+            )
 
-            def _progress(i, total, piece_count):
-                self.get_logger().info(f"[SAMPLING] {i}/{total} (pieces={piece_count})")
-
-            final_dict = self.sampler.sample_final_dict(progress_cb=_progress)
+            final_dict = self._wait_for_board_state(VISION_RECEIVE_TIMEOUT_SEC)
 
             self.get_logger().info(f"[SAMPLING] done. final pieces={len(final_dict)}")
             self.get_logger().info("[UI] uploading final_board and enabling verification")
@@ -455,7 +475,11 @@ class MainController(Node):
                 board_dict = final_board
                 self.get_logger().info("[UI] Using final_board for stockfish/robot (APPROVED).")
             else:
-                board_dict = self.fb.get_board_dict(BOARD_STATE_PATH)
+                # Live fallback (Phase 5 sub-phase B): pull the most recent ROS2 board_state
+                # cached by the subscriber. If vision has been silent since startup this
+                # raises TimeoutError, surfaced as a workflow exception (logged and
+                # cleaned up by the outer ``finally``).
+                board_dict = self._wait_for_board_state(VISION_RECEIVE_TIMEOUT_SEC)
                 self.get_logger().info("[UI] Using board_state for stockfish/robot (APPROVED).")
 
             depth, difficulty, turn = self.fb.get_chess_system_params(CHESS_SYSTEM_PATH)
