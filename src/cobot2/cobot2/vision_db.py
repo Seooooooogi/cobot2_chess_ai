@@ -282,6 +282,35 @@ class VisionNode(Node):
         self.board_state_pub.publish(msg)
 
     def _load_models(self):
+        # Rule 7 (fail-loud): 필수 env 미설정 시 명시 RuntimeError. None 통과 시
+        # ultralytics가 'None' does not exist 트레이스 후 launch respawn 무한 루프
+        # (PB-5 회귀 방지).
+        missing = [
+            name for name, value in (
+                ("YOLO_MODEL_PATH", YOLO_PATH),
+                ("RESNET_MODEL_PATH", RESNET_PATH),
+                ("CHESS_GRID_PATH", GRID_PATH),
+            ) if not value
+        ]
+        if missing:
+            raise RuntimeError(
+                f"vision_db missing required env vars: {missing}. "
+                "Source src/cobot2/.env (or set them via launch 'env=' / shell) before launch. "
+                "See .env.example for keys."
+            )
+        not_found = [
+            (name, value) for name, value in (
+                ("YOLO_MODEL_PATH", YOLO_PATH),
+                ("RESNET_MODEL_PATH", RESNET_PATH),
+                ("CHESS_GRID_PATH", GRID_PATH),
+            ) if not os.path.exists(value)
+        ]
+        if not_found:
+            raise RuntimeError(
+                f"vision_db env paths point to non-existent files: {not_found}. "
+                "Verify model + grid files exist."
+            )
+
         self.yolo_model = YOLO(YOLO_PATH)
         self.resnet_model, self.device = load_resnet_model(RESNET_PATH)
         self.grid_polygons = load_chess_grid(GRID_PATH)
