@@ -313,6 +313,7 @@ class AIMoveServiceNode(Node):
 
             response.best_move = best_move if best_move else ""
             response.success = True if best_move else False
+            response.fen = ""  # 기본값. AI 수 성공 시 아래에서 post-move FEN으로 채움.
 
             if best_move:
                 updated_dict = self.get_updated_dict(pieces_dict, best_move)
@@ -320,11 +321,16 @@ class AIMoveServiceNode(Node):
                 self._revoke_castling_rights(pieces_dict, updated_dict)
                 self.dict_memory = updated_dict
                 self._save_state()  # persist only on complete success
+                # AI 수 직후의 보드를 다음 차례 색상으로 FEN 직렬화 — game_logger
+                # audit (sub-phase E)에 활용. 차례 flip: 'w' ↔ 'b'.
+                next_turn = "b" if turn == "w" else "w"
+                response.fen = self.dict_to_fen(updated_dict, next_turn)
 
         except Exception as e:
             self.get_logger().error(f"Error in AI Calculation: {e}")
             response.success = False
             response.best_move = ""
+            response.fen = ""
             self.castling_rights = saved_rights  # rollback to pre-call state
             self.dict_memory = saved_memory
 

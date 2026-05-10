@@ -12,3 +12,5 @@ string last_move         # e.g., "E2E4" (en-passant 추론용; 비어있으면 d
 # Response
 string best_move         # e.g., "a2a4" 또는 "a7a8q" (promotion). 빈 문자열이면 게임 종료.
 bool success
+string fen               # AI 수가 두어진 직후 FEN 스냅샷. game_logger audit에 사용.
+                         # 빈 문자열이면 미기록 (best_move 비어 있을 때 등).
