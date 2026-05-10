@@ -11,11 +11,12 @@ def generate_launch_description():
     COBOT2 Chess System - 전체 시스템 Launch 파일
 
     실행되는 노드:
-    1. Stockfish AI 노드
+    1. Stockfish AI 노드 (ROS2 parameter로 depth/skill_level/default_turn 관리)
     2. CV 체스판 인식 노드 (ROS2 publisher: /vision/board_state)
-    3. 로봇 제어 노드
-    4. 통합 조정 노드 (board_state subscriber + Firebase ui_control listener)
-    5. rosbridge websocket — Web UI ↔ ROS2 (Phase 5 sub-phase C)
+    3. 로봇 제어 노드 (action server: /move_chess_piece)
+    4. 통합 조정 노드 (FSM, GameEvent publisher, UIStatus publisher, UserDecision Service)
+    5. 게임 로거 노드 (SQLite append-only audit log — Phase 5 sub-phase E)
+    6. rosbridge websocket — Web UI ↔ ROS2 (Phase 5 sub-phase C)
 
     사용 예시:
     ros2 launch cobot2 chess_system.launch.py
@@ -58,7 +59,20 @@ def generate_launch_description():
             respawn=True,
         ),
 
-        # 5. rosbridge WebSocket bridge (Phase 5 sub-phase C)
+        # 5. Game Logger — SQLite append-only audit log (Phase 5 sub-phase E)
+        # 구독: /main_controller/game_event + /main_controller/ui_status + /vision/board_state.
+        # DB: env CHESS_AI_LOG_DB_PATH > 기본 ~/.local/share/cobot2_chess_ai/game_log.db.
+        # respawn=True — DB write 실패 시 노드는 ERROR 로그만 남기고 계속 동작하지만
+        # startup 실패 (권한 등) 시 launch가 자동 재시작.
+        Node(
+            package='cobot2',
+            executable='gamelogger',
+            name='game_logger',
+            output='screen',
+            respawn=True,
+        ),
+
+        # 6. rosbridge WebSocket bridge (Phase 5 sub-phase C)
         # Default bind 0.0.0.0:9090. ADR-002 LAN-only 가정 — 외부 노출 시 nginx + WSS + auth 별도.
         # Rule 9: 화이트리스트로 노출 표면 제한. motion control action server (move_chess_piece) 등
         # 안전 관련 인터페이스는 LAN 클라이언트로부터 차단. sub-phase D에서 ui_control 서비스를

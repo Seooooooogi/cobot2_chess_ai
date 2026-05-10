@@ -30,6 +30,7 @@ setup(
             'robotaction = cobot2.robot_action:main',
             'main = cobot2.main:main',
             'object = cobot2.vision_db:main',
+            'gamelogger = cobot2.game_logger:main',
         ],
     },
 )
