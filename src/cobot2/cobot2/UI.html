@@ -109,27 +109,17 @@
   <script src="https://static.robotwebtools.org/roslibjs/current/roslib.min.js"></script>
 
   <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-    // sub-phase D4: onValue / update / ref 모두 dead — UI는 Firebase에 read/write 0건.
-    // import 자체는 sub-phase E의 Firebase 일괄 제거 시점에 함께 정리.
-    import { getDatabase } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
-
-    const firebaseConfig = {
-      apiKey: "AIzaSyBgbhDeN58hbI3mSNTBn9X9lgg7LDmdVs4",
-      authDomain: "chess-43355.firebaseapp.com",
-      databaseURL: "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app",
-      projectId: "chess-43355",
-      storageBucket: "chess-43355.firebasestorage.app",
-      messagingSenderId: "1064002421039",
-      appId: "1:1064002421039:web:e44d9b1392ae8a20eea1da"
-    };
-
-    const app = initializeApp(firebaseConfig);
-    const db = getDatabase(app);
-
-    // sub-phase D4: chess/ui_control read 경로 제거 — voice_message가 마지막 잔존
-    // 필드였고 음성 모듈은 이미 2026-05-04에 제거됨. main.py의 ui_control writes
-    // 자체는 sub-phase E에서 game_logger 노드로 이전하며 Firebase 일괄 제거.
+    // Phase 5 sub-phase E (2026-05-10): Firebase Web SDK 완전 제거.
+    //   D1까지: chess/board_state read → ROS2 /vision/board_state 구독으로 이전.
+    //   D1까지: ui_control write/read → ROS2 /main_controller/ui_status + user_decision.
+    //   D3:     chess/chess_system → stockfish 노드 ROS2 parameter.
+    //   D4:     voice_message dead field 제거.
+    //   E:      apiKey 포함 모든 Firebase 자원 제거.
+    // UI ↔ ROS2 통신은 rosbridge_websocket을 통한 4개 채널만:
+    //   - /vision/board_state (Topic, RELIABLE+TRANSIENT_LOCAL)
+    //   - /main_controller/ui_status (Topic, RELIABLE+TRANSIENT_LOCAL)
+    //   - /main_controller/user_decision (Service)
+    //   - /chess_ai_node/{get,set,...}_parameters (Service, 표준 parameter API)
 
     // Phase 5 sub-phase C: board_state는 rosbridge 경유 ROS2 토픽 구독
     // file:// URL일 때 hostname이 비어 있으면 localhost로 fallback
