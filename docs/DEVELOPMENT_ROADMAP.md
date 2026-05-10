@@ -165,17 +165,43 @@
 
 - 하드웨어/Firebase/rosbridge/카메라/Stockfish 의존성 0.
 - tempfile DB + 합성 GameEvent/UIStatus/BoardState publisher로 16건 검증 (행 수 / ply 증가 / FEN 기반 side 추론 / event kinds / TRIGGER 8 거부).
-- `feat/sim-game-logger` 브랜치 (cc5552f) — master 머지 대기.
+- master `ccbce07`에 통합.
 
-**Exit (충족)**: V1-1, M1-4, M1-5 RESOLVED + 통합 테스트 16/16 PASS. 풀스택 virtual baseline은 Phase 6 진입 직전 별도 기록 예정 (`outputs/baseline/phase5-integration/`).
+**Exit (충족)**: V1-1, M1-4, M1-5 RESOLVED + 통합 테스트 16/16 PASS.
+
+### Phase 5 Known Issues (Phase 6-0 baseline 발견, 2026-05-10)
+
+> 출처: `outputs/baseline/phase5-integration/SUMMARY.md` (gitignored). master `ccbce07`
+> 기준 풀스택 launch 첫 e2e 검증에서 발견. Phase 5 sub-phase별 단위 검증은 통과
+> 했으나 통합 launch 시 노드명 불일치로 광범위 라우팅 실패.
+
+| ID | Severity | 위치 | 증상 |
+|----|----------|------|------|
+| **PB-1** | **CRITICAL** | `chess_system.launch.py` `name=` 오버라이드 | 코드 `super().__init__("main_controller")` vs launch `name='chess_integration_node'` → `~/topic` 사설 네임스페이스가 `/chess_integration_node/...`로 풀림 (의도: `/main_controller/...`). 같은 패턴이 stockfish (`chess_ai_node`→`stockfish_node`) 등 다수. |
+| **PB-2** | **CRITICAL** | `game_logger.py` 절대 경로 구독 | `/main_controller/game_event` + `/main_controller/ui_status` 하드코드 → publisher count 0. **start_sampling 호출 후에도 games / moves / game_event 카운터 0**. Hard Rule #6 audit log 사실상 비어 있음. |
+| **PB-3** | **CRITICAL** | `chess_system.launch.py` rosbridge 화이트리스트 | `topics_glob`/`services_glob`가 `/main_controller/*` + `/chess_ai_node/*` 명시 — 둘 다 실제로 존재하지 않는 경로. **UI ↔ ROS2 거의 모든 채널 차단** (vision/* + rosapi/* 만 작동). |
+| **PB-4** | MAJOR | `stockfish.py:97` | service path가 `/StockfishMove` (root namespace) 등록. Rule 5 위반 — 코드 측 절대 경로 또는 launch remap 흔적 의심. |
+| **PB-5** | MAJOR | `vision_db.py:61` | `os.getenv("YOLO_MODEL_PATH")` None을 `YOLO()`에 직접 전달 → ultralytics가 `'None' does not exist` FileNotFoundError 후 launch respawn 무한 루프. **Rule 7 (fail-loud) 부분 위반**. |
+| **PB-6** | MINOR | `main.py` / `robot_action.py` shutdown | SIGINT 시 `rclpy.shutdown()` 명시 호출 + context already-shutdown 트레이스. 동작 무영향, 가드 권장. |
+
+**근본 원인 (PB-1~3 공통)**: launch가 코드의 노드명을 오버라이드해 sub-phase별 단위
+테스트(`ros2 run ... ` 직접 실행)와 통합 launch가 다른 노드명 공간을 사용. 단위
+테스트만 통과했고 통합 검증이 부재했음.
+
+**최소 침습 수정안 (1 커밋, ~10줄)**: launch 파일에서 `name=...` 오버라이드 모두 제거
+→ 코드의 `super().__init__(...)` 노드명을 single source of truth로 신뢰. 검증: 본
+baseline Step 4 재실행 시 `games >= 1` + 토픽 publisher count 정합.
+
+**Phase 6 진입 게이트**: PB-1~3 RESOLVED + 본 baseline Step 4 재실행 PASS 확인 후.
+PB-4~6은 별도 트랙 가능.
 
 ---
 
 ## Phase 6: 실기 검증 `mode:=real` — ⚪ NEXT
 
-**전제 조건**: Phase 4 OPEN 모두 RESOLVED ✅ + Phase 5 완료 ✅ + virtual baseline 기록 (Phase 5 → 6 전환 직전 1회).
+**전제 조건**: Phase 4 OPEN 모두 RESOLVED ✅ + Phase 5 완료 ✅ + Phase 5 Known Issues PB-1~3 RESOLVED ⚠ (현재 OPEN — 본 baseline 발견) + virtual baseline 재실행 PASS.
 
-- [ ] 6-0. virtual 풀스택 baseline 기록 (`outputs/baseline/phase5-integration/`) — 풀 launch + UI + sim_game_logger 통합 1회. **Phase 6 진입 직전 게이트**.
+- [x] 6-0. virtual 풀스택 baseline 기록 (`outputs/baseline/phase5-integration/`, 2026-05-10) — Phase 5 통합 검증 + Known Issues PB-1~6 발견. **PB-1~3 수정 후 baseline 재실행 필요** (Phase 6 진입 게이트).
 - [ ] 6-1. Hardware preflight — `ping 192.168.1.100` (M0609), `ping 192.168.1.1` (RG2 Modbus).
 - [ ] 6-2. 새 체스판 좌표 calibration — `data.json` `posnumx_interval` 등 실측.
 - [ ] 6-3. V1-7 — HSV color robustness (조명/색상 변동 검증).
