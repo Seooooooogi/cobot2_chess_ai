@@ -4,6 +4,8 @@
 
 **구조 변경 (2026-05-10)**: 인계 시점 1주일 Phase 0~4 스코프 → Phase 5 (Firebase → rosbridge 마이그레이션) + Phase 6 (실기 검증) 신설로 재구성. Phase 3 (Virtual Verification) 마일스톤 폐지 → 상시 규율로 통합. R/S/M/V 이슈 추적 표 명시.
 
+**Phase 5 완료 (2026-05-10)**: sub-phase A→E 13 커밋 (`3653be8..0630f29`)으로 master 머지. M1-4 / M1-5 / V1-1 RESOLVED. Firebase 의존성 (admin SDK + Web SDK + apiKey + 0.2s 폴링) 완전 제거. game_logger SQLite append-only TRIGGER로 Hard Rule #6 스키마 레벨 보장. **Phase 6 진입 가능 상태**.
+
 ---
 
 ## Status Summary
@@ -14,9 +16,9 @@
 | 1 | Code Mapping | ✅ COMPLETE |
 | 2 | Annotation & Documentation | ✅ COMPLETE |
 | 3 | ~~Virtual Verification~~ | 폐지 → 상시 규율 |
-| 4 | Refactoring (R/S/M/V) | ◐ 18/21 RESOLVED. R1-3 DEFERRED. M1-4/M1-5/V1-1 → Phase 5 |
-| 5 | Firebase → rosbridge 마이그레이션 | ⚪ NEW (Phase 4 잔여 RESOLVED 후 진입) |
-| 6 | 실기 검증 `mode:=real` | ⚪ NEW (Phase 5 완료 후 진입) |
+| 4 | Refactoring (R/S/M/V) | ✅ COMPLETE (M1-4/M1-5/V1-1 RESOLVED via Phase 5; R1-3 DEFERRED) |
+| 5 | Firebase → rosbridge 마이그레이션 | ✅ COMPLETE (sub-phase A→E 모두 완료, master `0630f29`) |
+| 6 | 실기 검증 `mode:=real` | ⚪ NEXT (Phase 5 완료 → 진입 가능) |
 
 ---
 
@@ -79,11 +81,11 @@
 | M1-1 | voice_command 무한 대기 (Rule 2) | `main.py` | ✅ RESOLVED | `90078c5` |
 | M1-2 | 서비스/액션 QoS 미명시 (Rule 4) | `main.py` | ✅ RESOLVED | `cec0ed0` |
 | M1-3 | Firebase 경로 하드코딩 | `main.py` | ✅ RESOLVED | `edd15bc` |
-| M1-4 | Firebase가 메시지 버스 (Rule 7) | `main.py` | ⚪ OPEN → Phase 5 |
-| M1-5 | workflow time.sleep 폴링 | `main.py` | ⚪ OPEN → Phase 5 부분 중첩 |
+| M1-4 | Firebase가 메시지 버스 (Rule 7) | `main.py` | ✅ RESOLVED | `f0f58f3` (Phase 5 E) |
+| M1-5 | workflow time.sleep 폴링 | `main.py` | ✅ RESOLVED | `620a34b` (Phase 5 D2) |
 | M1-6 | voice_control_node 의존 | `main.py` | ✅ RESOLVED | `90078c5` |
 | M1-7 | voice_status dead pub | `main.py` | ✅ RESOLVED | `90078c5` |
-| V1-1 | ROS2 노드 미등록 (Rule 2) | `vision_db.py` | ⚪ OPEN → Phase 5 |
+| V1-1 | ROS2 노드 미등록 (Rule 2) | `vision_db.py` | ✅ RESOLVED | `3653be8` (Phase 5 B) + `1a3b428` (C) + `7460208` (E) |
 | V1-2 | 모델 경로 하드코딩 | `vision_db.py` | ✅ RESOLVED | `70ab813` |
 | V1-4 | CAMERA SOURCE 하드코딩 | `vision_db.py` | ✅ RESOLVED | `70ab813` |
 
@@ -94,11 +96,11 @@
 - ~~**R1-3** TOOLCHARGER_IP / TOOLCHARGER_PORT 환경변수화.~~ **DEFERRED 2026-05-10** — 사용자 결정으로 하드코딩 유지. 단일 호스트 + 고정 그리퍼 IP 시나리오에서 환경변수화 이득 < 변경 비용. Phase 6 실기 다호스트 확장 시 재검토.
 - ~~**R1-4** Modbus 단절 페일세이프.~~ **RESOLVED 2026-05-10** (`765082c`) — L0 하드웨어 E-stop + L1 SW 페일세이프 (Option 1 STOP + Option 3 HOLD: `set_safety_mode(RECOVERY, STOP)` bounded). 회복: `~/reset` Service 두 단계 (gripper reconnect + safety mode AUTONOMOUS 복귀). MockGripper로 가상 검증. 실기 검증은 Phase 6.
 
-### Phase 4 OPEN → Phase 5에서 자동 RESOLVED
+### Phase 4 OPEN → Phase 5에서 자동 RESOLVED (✅ 완료)
 
-- **M1-4** (Firebase as message bus) — Phase 5 sub-phase B/C에서 ROS2 토픽/Service로 전환되며 해결.
-- **V1-1** (vision_db not a node) — Phase 5 sub-phase A에서 `rclpy.Node` 노드화로 해결.
-- **M1-5** 부분 중첩 — Phase 5 sub-phase D에서 `_poll_ui_decision` 폴링 제거.
+- **M1-4** (Firebase as message bus) — Phase 5 sub-phase B (`3653be8`) + D1 (`830284e`) + E (`f0f58f3`)에서 ROS2 토픽/Service로 전환 완료.
+- **V1-1** (vision_db not a node) — Phase 5 sub-phase B (`3653be8`)에서 `rclpy.Node` 노드화 + E (`7460208`)에서 Firebase dual-write 제거로 완료.
+- **M1-5** (`_poll_ui_decision` 폴링) — Phase 5 sub-phase D2 (`620a34b`)에서 UserDecision Service로 대체 완료.
 
 ### MINOR 미해결 (handoff 임시 넘버링, 별도 트랙)
 
@@ -109,71 +111,80 @@
 
 ---
 
-## Phase 5: Firebase → rosbridge 마이그레이션 (NEW)
+## Phase 5: Firebase → rosbridge 마이그레이션 — ✅ COMPLETE (2026-05-10)
 
 **Why**: V1-1 (Rule 2) + M1-4 (Rule 7) 위반 해소. 외부 클라우드 의존 제거. `UI.html:114` 하드코딩 apiKey 제거. 0.2s 폴링 → push (latency/CPU 개선). Hard Rule #6 (append-only logs)은 별도 영속 레이어로 보존. ADR-002 참조.
 
-**전제 조건**: Phase 4 R1-3, R1-4 RESOLVED.
+**전제 조건**: Phase 4 R1-3, R1-4 RESOLVED. ✅ 충족.
 
-### A. vision_db → ROS2 Publisher 노드화
+**완료 시점**: master HEAD `0630f29` (2026-05-10). 13 커밋 (`3653be8..0630f29`). Sub-phase별 feat 브랜치에서 작업 후 master 머지.
 
-> 본 sub-phase는 venv 가정. **Open Decision "YOLO Runtime"** 결과에 따라 재설계 가능.
+### A+B. vision_db → ROS2 Publisher 노드화 + main.py 수신 경로 전환 — ✅ DONE
 
-- `src/cobot2/cobot2/vision_db.py` 재작성: `rclpy.Node` 상속, `/vision/board_state` Publisher.
-- `src/cobot2_interfaces/msg/BoardState.msg` 신규 — 8×8 board dict + `std_msgs/Header`.
-- QoS: RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) (Rule 4 명시, late join 대응).
-- Frame: `chess_board` (REP-105 컨벤션 검토 필요 — `# verify needed`).
-- V1-1 RESOLVED.
+- ✅ `src/cobot2/cobot2/vision_db.py` `VisionNode(Node)`로 재작성. `vision/board_state` Publisher (private namespace, Rule 5 상대 경로).
+- ✅ `src/cobot2_interfaces/msg/BoardState.msg` — squares[]/pieces[] 평행 배열 + Header + piece_count.
+- ✅ QoS: RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) (late join 대응).
+- ✅ Frame: `chess_board`.
+- ✅ `main.py`: Firebase polling 제거 → `/vision/board_state` Subscriber. `_sample_and_decide()` 5-frame vote 보존.
+- 커밋: `3653be8` (Phase 5 sub-phase B).
 
-### B. main.py 수신 경로 전환
+### C. rosbridge_server launch + UI board_state 전환 — ✅ DONE
 
-- `BOARD_STATE_PATH` Firebase 읽기 → `/vision/board_state` Subscriber.
-- `_sample_and_decide()` (5회 sample) 로직: ROS2 토픽 5회 수신 후 vote, 또는 단일 latched + timeout (재설계 필요).
-- 일부 M1-5 폴링 제거.
+- ✅ `chess_system.launch.py`에 `rosbridge_websocket` 노드 추가 (port 9090, LAN bind).
+- ✅ `UI.html`: roslibjs `/vision/board_state` 구독으로 board 표시.
+- 커밋: `1a3b428` (Phase 5 sub-phase C).
 
-### C. rosbridge_server launch + UI board_state 전환
+### D. ui_control + chess_system → ROS2 Service / Parameter — ✅ DONE
 
-- `src/cobot2/launch/chess_system.launch.py`에 `rosbridge_websocket_launch.xml` 또는 직접 노드 추가 (port 9090, LAN only bind).
-- `UI.html`: Firebase Web SDK board_state 구독 → `roslibjs.Topic('/vision/board_state')` 구독으로 교체 (이중 운용 단계 — ui_control은 아직 Firebase).
-- 회귀 검증: 기존 Firebase 흐름 보존 + ROS2 경로 추가.
+- ✅ **D1**: `msg/UIStatus.msg` (controller_state STATE_* 4종, verification, working, ai_suggested_move, job_id, BoardState final_board). `main_controller/ui_status` 토픽 latched 발행. UI roslibjs 구독. 커밋 `830284e`.
+- ✅ **D2**: `srv/UserDecision.srv` (uint8 decision APPROVED/RECHECKED/GAME_OVER + job_id + corrected_board). `main.py` `_poll_ui_decision` 타이머 제거 → Service handler. **M1-5 RESOLVED**. 커밋 `620a34b`.
+- ✅ **D3**: stockfish 노드 ROS2 parameter (`depth`, `skill_level`, `default_turn`). UI는 rosbridge `set_parameters`. **`StockfishMove.srv` 단순화**: depth/skill_level/turn Request 필드 제거 (sentinel 0 충돌 회피, parameter 단일 경로). 커밋 `e80407e`.
+- ✅ **D4**: UI Firebase ui_control listener + voice_message dead 필드 제거. 커밋 `4ca3cf4`.
+- *Note*: `srv/CorrectBoard.srv`는 별도 정의하지 않고 `UserDecision.srv`의 `corrected_board(BoardState)` 필드로 통합 (단일 채널 단순화).
 
-### D. ui_control + chess_system → ROS2 Service / Parameter
+### E. Firebase 코드 제거 + 영속 로그 신규 노드 — ✅ DONE
 
-- `src/cobot2_interfaces/srv/UserDecision.srv` 신규 — Request: `decision` ("APPROVED"/"RE-CHECKED"/"GAME-OVER"), `corrected_board` (str JSON, optional) / Response: `accepted` (bool).
-- `src/cobot2_interfaces/srv/CorrectBoard.srv` 신규 — Request: `board` (str JSON) / Response: `success`, `message`.
-- `chess_system` (depth/difficulty/turn) → stockfish 노드의 ROS2 parameter (`depth`, `skill_level`, `default_turn`). UI는 rosbridge `set_parameters` API 사용.
-- `main.py`: `_poll_ui_decision` 타이머 제거 → Service handler. M1-5 RESOLVED.
-- `main.py` FSM 전이: Service 호출 기반.
-- `UI.html`: roslibjs Service 호출 + parameter API.
-
-### E. Firebase 코드 제거 + 영속 로그 신규 노드
-
-- `firebase_admin` import / `FirebaseClient` 클래스 / Firebase Web SDK 전체 제거.
-- `.env`에서 `FIREBASE_*` 키 제거. `.env.example` 동반 갱신.
-- 신규: `src/cobot2/cobot2/game_logger.py` — ROS2 logger 노드.
-  - 구독: `/vision/board_state`, `/chess/ui_status`, `/chess/move_executed`, `/chess/game_event`.
+- ✅ `firebase_admin` import / `FirebaseClient` 클래스 / Firebase Web SDK 전체 제거. 커밋 `f0f58f3` (main) + `7460208` (vision_db) + `d4c6c00` (UI).
+- ✅ `.env`에서 `FIREBASE_*` 키 제거 + `.env.example` 갱신 + ADR-002 IMPLEMENTED 상태 기록. 커밋 `e2f2601`.
+- ✅ 신규 `src/cobot2/cobot2/game_logger.py` — ROS2 logger 노드. 커밋 `3720557` (구현) + `365efe0` (launch+setup).
+  - 구독: `/main_controller/game_event` (depth=10, latched) + `/main_controller/ui_status` (depth=1) + `/vision/board_state` (depth=1).
   - 영속: SQLite (`~/.local/share/cobot2_chess_ai/game_log.db`, env: `CHESS_AI_LOG_DB_PATH`).
-  - 스키마 (초안):
-    - `events` (`id INTEGER PK, ts_ros REAL, ts_wall TEXT, kind TEXT, payload_json TEXT`)
-    - `moves` (`game_id INTEGER, ply INTEGER, uci TEXT, side TEXT, fen TEXT, ts REAL`)
-    - `games` (`id INTEGER PK, started_at TEXT, ended_at TEXT, result TEXT`)
-  - **Hard Rule #6 (append-only)**: UPDATE/DELETE 금지. WAL 모드, atomic transaction.
-- M1-4 RESOLVED. V1-1 confirmed RESOLVED.
+  - 실제 스키마 (4 테이블):
+    - `games` (`game_id PK, started_at`)
+    - `game_results` (`game_id PK FK, ended_at, result`)
+    - `moves` (`id PK, game_id FK, ply, uci, side, fen, ts_ros`)
+    - `events` (`id PK, ts_ros, ts_wall, game_id, kind, payload_json`)
+  - **Hard Rule #6**: SQLite TRIGGER 8개 (4 테이블 × UPDATE/DELETE 거부) — 스키마 레벨 보장. WAL + foreign_keys.
+- ✅ 신규 `msg/GameEvent.msg` — kind enum (GAME_START/GAME_END/AI_MOVE/USER_BOARD_CONFIRMED) + game_id/job_id/uci/fen/result. 커밋 `485d94f`.
+- ✅ `srv/StockfishMove.srv`에 post-move `fen` Response 필드 추가 (audit 용). 커밋 `ee71f71`.
+- ✅ `main.py`: GameEvent를 FSM 경계에서 발행 + `_current_game_id` 라이프사이클 관리.
+- ✅ docstring stale Firebase 언급 정리. 커밋 `0630f29`.
+- **M1-4 RESOLVED. V1-1 confirmed RESOLVED**.
 
-**Exit**: V1-1, M1-4 RESOLVED + virtual 모드 풀 스택 통합 시퀀스 1회 성공 + baseline 기록 (`outputs/baseline/phase5-integration/`).
+### 통합 테스트 — `scripts/sim_game_logger.py`
+
+- 하드웨어/Firebase/rosbridge/카메라/Stockfish 의존성 0.
+- tempfile DB + 합성 GameEvent/UIStatus/BoardState publisher로 16건 검증 (행 수 / ply 증가 / FEN 기반 side 추론 / event kinds / TRIGGER 8 거부).
+- `feat/sim-game-logger` 브랜치 (cc5552f) — master 머지 대기.
+
+**Exit (충족)**: V1-1, M1-4, M1-5 RESOLVED + 통합 테스트 16/16 PASS. 풀스택 virtual baseline은 Phase 6 진입 직전 별도 기록 예정 (`outputs/baseline/phase5-integration/`).
 
 ---
 
-## Phase 6: 실기 검증 `mode:=real` (NEW, handoff Priority 5)
+## Phase 6: 실기 검증 `mode:=real` — ⚪ NEXT
 
-**전제 조건**: Phase 4 OPEN 모두 RESOLVED + Phase 5 완료 + virtual baseline 기록 완료.
+**전제 조건**: Phase 4 OPEN 모두 RESOLVED ✅ + Phase 5 완료 ✅ + virtual baseline 기록 (Phase 5 → 6 전환 직전 1회).
 
+- [ ] 6-0. virtual 풀스택 baseline 기록 (`outputs/baseline/phase5-integration/`) — 풀 launch + UI + sim_game_logger 통합 1회. **Phase 6 진입 직전 게이트**.
 - [ ] 6-1. Hardware preflight — `ping 192.168.1.100` (M0609), `ping 192.168.1.1` (RG2 Modbus).
 - [ ] 6-2. 새 체스판 좌표 calibration — `data.json` `posnumx_interval` 등 실측.
 - [ ] 6-3. V1-7 — HSV color robustness (조명/색상 변동 검증).
 - [ ] 6-4. V1-8 — `chess_grid` 좌표 매칭 (calibration → 그리드 좌표 변환 검증).
-- [ ] 6-5. 통합 시퀀스 1회 (`mode:=real`) — vision → main → stockfish → robot_action → 실 그리퍼 동작.
-- [ ] 6-6. baseline 기록 (`outputs/baseline/phase6-real/`).
+- [ ] 6-5. M0609 RECOVERY → AUTONOMOUS 전이 SW alone 가능 vs 티치펜던트 manual 필요 검증 (R1-4 실기 검증).
+- [ ] 6-6. DSR `set_safety_mode` 실기 round-trip 동작.
+- [ ] 6-7. pymodbus `get_status` 자체 hang 가능성 (onrobot.RG socket timeout 미설정).
+- [ ] 6-8. 통합 시퀀스 1회 (`mode:=real`) — vision → main → stockfish → robot_action → 실 그리퍼 동작.
+- [ ] 6-9. baseline 기록 (`outputs/baseline/phase6-real/`).
 
 **Exit**: 통합 실기 시퀀스 1회 성공 + baseline 아티팩트 저장.
 
@@ -212,15 +223,17 @@
 
 **Default 가정**: A (venv). 변경 시 Phase 5 sub-phase A 재설계 필요.
 
-**결정 (2026-05-10)**: **A 채택**. Phase 5 sub-phase A는 `vision_db.py`에 `rclpy.Node` 상속 + `/vision/board_state` Publisher 추가 (단순). B/C는 Phase 6 또는 그 이후 별도 트랙으로 재검토 가능.
+**결정 (2026-05-10)**: **A 채택**. Phase 5는 venv 가정으로 완료됨. B/C는 Phase 6 또는 그 이후 별도 트랙으로 재검토 가능 (인계자 재현성 / GPU 박스 분리 요건 발생 시).
 
 ### Other
 
-- **shebang 영속화** — wrapper / setup.py hook / cmake flag. Phase 5 진입 시 결정.
+- **shebang 영속화** — wrapper / setup.py hook / cmake flag. 미결.
 - **ROBOT_MODE↔DSR mode 통합** — m0609_rg2_bringup 패턴. 임시 mitigation = startup WARN.
 - **DR_init bringup 통합** — 시점 미정.
 - **vendored 패키지 freeze 정책** — README 명시 (`git clone <commit>`) 미작성.
 - **외부 인증/원격 접근** — LAN only 결정. 원격 노출 요구 시 nginx + WSS + auth 별도 검토.
+- **demo/virtual-rviz 처리** — 영상 촬영 후 보류/삭제 결정.
+- **머지된 feat 브랜치 정리** — 7개 (`feat/cleanup-voice-msg`, `feat/firebase-removal-game-logger`, `feat/stockfish-params`, `feat/ui-status-topic`, `feat/user-decision-srv`, `feat/web-ui-ros2-bridge`, 머지 후 `feat/sim-game-logger`). 사용자 명시 승인 필요.
 
 ---
 
