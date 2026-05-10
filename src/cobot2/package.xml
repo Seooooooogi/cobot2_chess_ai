@@ -13,7 +13,10 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>cobot2_interfaces</depend>
-  
+
+  <!-- Phase 5 sub-phase C: Web UI ↔ ROS2 bridge -->
+  <exec_depend>rosbridge_server</exec_depend>
+
   <!-- Python dependencies -->
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
