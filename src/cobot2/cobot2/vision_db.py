@@ -1,37 +1,42 @@
-"""Vision pipeline — chess piece recognition + Firebase write (entry point: ``ros2 run cobot2 object``).
+"""Vision pipeline — chess piece recognition + ROS2 publish + Firebase write (entry point: ``ros2 run cobot2 object``).
 
-NOT a ROS2 node:
-    This file does not import ``rclpy``, define a ``Node`` subclass, or call ``rclpy.init``. It is
-    registered as a console script under ``cobot2`` but operates entirely outside the ROS2 graph.
-    Communication with ``main.py`` flows through Firebase Realtime DB
-    (``chess/board_state``) — Firebase is the message bus → ROS2 Rule 2 / Rule 7 violation (V1-1 CRITICAL).
+ROS2 node:
+    Subclass of ``rclpy.node.Node`` (V1-1 RESOLVED 2026-05-10, Phase 5 sub-phase A).
+    Publishes recognized board state on ``/vision/board_state`` (``cobot2_interfaces/msg/BoardState``)
+    using QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) so late-joining subscribers
+    (e.g. ``main`` node, web UI via ``rosbridge_websocket``) receive the most recent value.
+    Firebase Realtime DB write is preserved during the migration (sub-phase A) so existing
+    ``main.py`` ``chess/board_state`` consumers keep working until sub-phase B/E remove them.
 
-Pipeline (``main()``, line 242):
+Pipeline (``VisionNode.run``):
     OpenCV ``VideoCapture(SOURCE)``
       → YOLO inference (foot-point per box)
       → grid polygon hit-test (``load_chess_grid``)
       → HSV V-channel threshold → piece color
       → ResNet18 classifier (6 chess piece classes) → ``WP``/``BR``/...
-      → ``board_dict`` → Firebase ``chess/board_state``
+      → ``board_dict`` → ROS2 ``/vision/board_state`` publish + Firebase ``chess/board_state``
 
-Throttling:
-    - ``ANALYZE_INTERVAL_SEC = 0.20`` (line 72) — minimum gap between YOLO+ResNet runs.
-    - ``FIREBASE_UPDATE_MIN_INTERVAL_SEC = 0.20`` (line 73) — minimum gap between DB writes.
-    - ``ONLY_UPDATE_ON_CHANGE`` (line 74) — skip write if normalized board dict unchanged.
+ROS2 parameters (declared in ``VisionNode.__init__``):
+    - ``analyze_interval_sec``        (double, default 0.20) — minimum gap between YOLO+ResNet runs.
+    - ``publish_min_interval_sec``    (double, default 0.20) — minimum gap between board_state publishes.
+    - ``only_publish_on_change``      (bool, default True)  — skip publish/write if normalized board unchanged.
+    - ``frame_id``                    (string, default ``chess_board``) — Header frame_id on published msgs.
+                                       # verify needed: ``chess_board`` is project-defined; not REP-105 covered.
 
-External Dependencies:
-    - YOLO weights:   ``YOLO_PATH``  (line 54) — ``YOLO_MODEL_PATH`` env var (required).
-    - ResNet weights: ``RESNET_PATH`` (line 55) — ``RESNET_MODEL_PATH`` env var (required).
-    - Grid JSON:      ``GRID_PATH``  (line 56) — ``CHESS_GRID_PATH`` env var (required).
-    - Camera:         ``SOURCE`` (line 57) — ``CAMERA_SOURCE`` env var (default ``3``).
-    - Firebase:       ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var (line 66); ``FIREBASE_DATABASE_URL`` env var (line 67).
+External Dependencies (env vars):
+    - YOLO weights:   ``YOLO_PATH``  (``YOLO_MODEL_PATH`` env var, required).
+    - ResNet weights: ``RESNET_PATH`` (``RESNET_MODEL_PATH`` env var, required).
+    - Grid JSON:      ``GRID_PATH``  (``CHESS_GRID_PATH`` env var, required).
+    - Camera:         ``SOURCE`` (``CAMERA_SOURCE`` env var, default ``3``).
+    - Firebase:       ``FIREBASE_SERVICE_ACCOUNT_PATH``; ``FIREBASE_DATABASE_URL`` env vars.
 
 Issues (Phase 1-1 doc Node 4):
-    - CRITICAL  V1-1: registered as a ROS2 entry point but does not participate in the ROS2 graph.
-    - V1-2 RESOLVED 2026-05-01: ``YOLO_PATH``/``RESNET_PATH``/``GRID_PATH`` env-ized via ``YOLO_MODEL_PATH``/``RESNET_MODEL_PATH``/``CHESS_GRID_PATH`` env vars (lines 54-56).
-    - V1-4 RESOLVED 2026-05-01: ``SOURCE`` env-ized via ``CAMERA_SOURCE`` env var (line 57, default 3).
+    - V1-1 RESOLVED 2026-05-10 (Phase 5 sub-phase A): node now subclasses ``rclpy.node.Node`` and publishes
+      ``/vision/board_state``. Firebase dual-write retained until sub-phase E removes Firebase coupling.
+    - V1-2 RESOLVED 2026-05-01: model paths env-ized.
+    - V1-4 RESOLVED 2026-05-01: ``CAMERA_SOURCE`` env var.
     # verify needed V1-7: piece-color HSV V-channel thresholds (80, 105) — robustness across lighting.
-    # verify needed V1-8: confirm ``CHESS_GRID_PATH`` env var points to valid ``chess_grid.json`` — content match with repo copy unverified.
+    # verify needed V1-8: confirm ``CHESS_GRID_PATH`` env var points to valid ``chess_grid.json``.
 """
 
 import cv2
@@ -49,6 +54,12 @@ from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, db
 
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+
+from cobot2_interfaces.msg import BoardState
+
 
 # ================= [사용자 설정 구역] =================
 YOLO_PATH = os.getenv("YOLO_MODEL_PATH")
@@ -57,7 +68,6 @@ GRID_PATH = os.getenv("CHESS_GRID_PATH")
 SOURCE = int(os.getenv("CAMERA_SOURCE", "3"))
 
 SAVE_DIR = "./captured_boards"
-os.makedirs(SAVE_DIR, exist_ok=True)
 
 CLASS_NAMES = ["Pawn", "Rook", "Knight", "Bishop", "Queen", "King"]
 CLASS_ABBR = {"Pawn": "P", "Rook": "R", "Knight": "N", "Bishop": "B", "Queen": "Q", "King": "K"}
@@ -67,13 +77,11 @@ FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
 FIREBASE_DB_URL = os.getenv("FIREBASE_DATABASE_URL", "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app")
 FIREBASE_DB_PATH = "chess/board_state"
 
-# ===== 동작 옵션 =====
-ANALYZE_INTERVAL_SEC = 0.20
-FIREBASE_UPDATE_MIN_INTERVAL_SEC = 0.20
-ONLY_UPDATE_ON_CHANGE = True
-
 # 디버그 저장 (원하면 True)
 SAVE_EACH_ANALYSIS_FRAME = False
+
+# ===== ROS2 토픽 (Rule 5: 노드 코드는 상대 경로만; 절대 경로 매핑은 launch에서) =====
+BOARD_STATE_TOPIC = "vision/board_state"
 # ====================================================
 
 
@@ -229,6 +237,9 @@ def normalize_board_dict(d):
 
 
 def update_firebase_board(ref, board_dict):
+    # ``chess/board_state`` is the *current-state* snapshot (live mirror), not an audit log.
+    # Hard Rule #6 (append-only Firebase logs) targets game/event records (e.g. moves, results),
+    # not this overwrite-by-design current-state path. Sub-phase E removes this dual-write entirely.
     payload = {
     "updated_at": now_iso_ms(),
     "piece_count": len(board_dict),
@@ -237,72 +248,175 @@ def update_firebase_board(ref, board_dict):
     ref.set(payload)
 
 
+class VisionNode(Node):
+    """ROS2 node wrapping the camera + inference loop.
 
-def main():
-    init_firebase()
-    ref = db.reference(FIREBASE_DB_PATH)
+    Publishes ``BoardState`` on the relative topic ``vision/board_state`` (resolves
+    to ``/vision/board_state`` at root namespace) with QoS RELIABLE + TRANSIENT_LOCAL
+    + KEEP_LAST(1). Firebase write is performed in parallel during sub-phase A
+    migration (removed in sub-phase E).
 
-    yolo_model = YOLO(YOLO_PATH)
-    resnet_model, device = load_resnet_model(RESNET_PATH)
-    grid_polygons = load_chess_grid(GRID_PATH)
+    Note on parameter dynamics:
+        ``run()`` is a blocking OpenCV loop with no ``rclpy.spin()``. Parameters
+        are read once in ``__init__`` and cached as instance attributes; runtime
+        ``ros2 param set`` calls are accepted by the parameter server but will
+        NOT take effect until the node restarts. ``add_on_set_parameters_callback``
+        is intentionally not wired (sub-phase A scope). A future sub-phase that
+        switches to a Timer + ``spin()`` model will re-enable dynamic params.
+    """
 
-    preprocess = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
+    def __init__(self):
+        super().__init__("vision_db")
 
-    cap = cv2.VideoCapture(SOURCE)
-    if not cap.isOpened():
-        print("Camera open failed.")
-        return
+        self.declare_parameter("analyze_interval_sec", 0.20)
+        self.declare_parameter("publish_min_interval_sec", 0.20)
+        self.declare_parameter("only_publish_on_change", True)
+        self.declare_parameter("frame_id", "chess_board")
 
-    print("Vision running. Updates Firebase on each recognition. Press Q to quit.")
+        self.analyze_interval_sec = float(
+            self.get_parameter("analyze_interval_sec").value
+        )
+        self.publish_min_interval_sec = float(
+            self.get_parameter("publish_min_interval_sec").value
+        )
+        self.only_publish_on_change = bool(
+            self.get_parameter("only_publish_on_change").value
+        )
+        self.frame_id = str(self.get_parameter("frame_id").value)
 
-    last_analyze_ts = 0.0
-    last_firebase_ts = 0.0
-    last_sent_board = None
+        board_state_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+        self.board_state_pub = self.create_publisher(
+            BoardState, BOARD_STATE_TOPIC, board_state_qos
+        )
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        init_firebase()
+        self.firebase_ref = db.reference(FIREBASE_DB_PATH)
 
-        now_ts = time.time()
-        display_frame = frame.copy()
-        cv2.putText(display_frame, "RUNNING - Firebase Auto Update (Q: quit)", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        self.cap = None
+        self.yolo_model = None
+        self.resnet_model = None
+        self.device = None
+        self.grid_polygons = None
+        self.preprocess = None
 
-        do_analyze = (now_ts - last_analyze_ts) >= ANALYZE_INTERVAL_SEC
-        if do_analyze:
-            last_analyze_ts = now_ts
+    def _publish_board_state(self, board_dict, capture_stamp):
+        # board_dict is expected to be the output of normalize_board_dict (already key-sorted),
+        # but we re-sort defensively so callers can pass any dict-like board.
+        msg = BoardState()
+        msg.header.stamp = capture_stamp
+        msg.header.frame_id = self.frame_id
+        items = sorted(board_dict.items())
+        msg.squares = [k for k, _ in items]
+        msg.pieces = [v for _, v in items]
+        msg.piece_count = len(items)
+        self.board_state_pub.publish(msg)
 
-            board_dict = analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, preprocess)
-            board_norm = normalize_board_dict(board_dict)
+    def _load_models(self):
+        self.yolo_model = YOLO(YOLO_PATH)
+        self.resnet_model, self.device = load_resnet_model(RESNET_PATH)
+        self.grid_polygons = load_chess_grid(GRID_PATH)
+        self.preprocess = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
 
-            if SAVE_EACH_ANALYSIS_FRAME:
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                cv2.imwrite(os.path.join(SAVE_DIR, f"frame_{ts}.jpg"), frame)
+    def run(self):
+        self._load_models()
 
-            should_send = True
+        self.cap = cv2.VideoCapture(SOURCE)
+        if not self.cap.isOpened():
+            # Rule 7: 조용한 실패 방지. RuntimeError를 발생시켜 supervisor/launch가 관찰할 수 있도록.
+            raise RuntimeError(f"Camera open failed (source={SOURCE})")
 
-            if ONLY_UPDATE_ON_CHANGE:
-                if last_sent_board is not None and board_norm == last_sent_board:
+        self.get_logger().info(
+            f"Vision running. Publishing on {BOARD_STATE_TOPIC} + Firebase {FIREBASE_DB_PATH}. Press Q to quit."
+        )
+
+        last_analyze_ts = 0.0
+        last_publish_ts = 0.0
+        last_sent_board = None
+
+        while rclpy.ok():
+            ret, frame = self.cap.read()
+            # Rule 7: stamp = 측정 시점. cap.read() 직후 캡처.
+            capture_stamp = self.get_clock().now().to_msg()
+            if not ret:
+                break
+
+            now_ts = time.time()
+            display_frame = frame.copy()
+            cv2.putText(
+                display_frame,
+                "RUNNING - ROS2 + Firebase Auto Update (Q: quit)",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2,
+            )
+
+            if (now_ts - last_analyze_ts) >= self.analyze_interval_sec:
+                last_analyze_ts = now_ts
+
+                board_dict = analyze_frame(
+                    frame,
+                    self.yolo_model,
+                    self.resnet_model,
+                    self.grid_polygons,
+                    self.device,
+                    self.preprocess,
+                )
+                board_norm = normalize_board_dict(board_dict)
+
+                if SAVE_EACH_ANALYSIS_FRAME:
+                    os.makedirs(SAVE_DIR, exist_ok=True)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                    cv2.imwrite(os.path.join(SAVE_DIR, f"frame_{ts}.jpg"), frame)
+
+                should_send = True
+                if self.only_publish_on_change and last_sent_board is not None and board_norm == last_sent_board:
                     should_send = False
 
-            if should_send and (now_ts - last_firebase_ts) >= FIREBASE_UPDATE_MIN_INTERVAL_SEC:
-                update_firebase_board(ref, board_norm)
-                last_firebase_ts = now_ts
-                last_sent_board = board_norm
-                print(f"[DB UPDATED] squares={len(board_norm)} at {now_iso_ms()}")
+                if should_send and (now_ts - last_publish_ts) >= self.publish_min_interval_sec:
+                    self._publish_board_state(board_norm, capture_stamp)
+                    update_firebase_board(self.firebase_ref, board_norm)
+                    last_publish_ts = now_ts
+                    last_sent_board = board_norm
+                    self.get_logger().info(
+                        f"[PUBLISHED] squares={len(board_norm)} at {now_iso_ms()}"
+                    )
 
-        cv2.imshow("Chess Vision Tracker", display_frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q") or key == ord("Q"):
-            break
+            cv2.imshow("Chess Vision Tracker", display_frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q") or key == ord("Q"):
+                break
 
-    cap.release()
-    cv2.destroyAllWindows()
+    def cleanup(self):
+        if self.cap is not None:
+            self.cap.release()
+        cv2.destroyAllWindows()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = None
+    try:
+        node = VisionNode()
+        node.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if node is not None:
+            node.cleanup()
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
