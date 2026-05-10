@@ -159,6 +159,20 @@
       },
     });
 
+    // Phase 5 sub-phase D1: main_controller → UI 상태 토픽 (verification, working,
+    // ai_suggested_move, final_board, controller_state). Firebase ui_control의
+    // backend→UI 필드는 이 콜백으로 이전 — voice_message만 D4까지 Firebase에 잔존.
+    const uiStatusTopic = new ROSLIB.Topic({
+      ros: ros,
+      name: "/main_controller/ui_status",
+      messageType: "cobot2_interfaces/msg/UIStatus",
+      qos_profile_overrides: {
+        reliability: 1,    // RELIABLE
+        durability: 1,     // TRANSIENT_LOCAL
+        depth: 1,
+      },
+    });
+
     let isManualMode = false;
     let verificationOn = false;
 
@@ -253,39 +267,32 @@
       $("#status").text("카메라 실시간 인식 중...");
     });
 
-    onValue(controlRef, (snapshot) => {
-      const data = snapshot.val();
-      if (!data) return;
+    // Phase 5 sub-phase D1: backend → UI 상태는 ROS2 UIStatus 토픽에서 읽기.
+    // verification / working / ai_suggested_move / final_board 모두 이 콜백으로 이전.
+    uiStatusTopic.subscribe((msg) => {
+      if (!msg) return;
 
-      // 추천 수 표시
-      if (data.ai_suggested_move) {
-        $("#aiMoveDisplay").val(data.ai_suggested_move);
-      }
-
-      // voice_message 표시
-      if (typeof data.voice_message === "string") {
-        lastVoiceMessage = data.voice_message;
-
-        // working 애니메이션이 돌고 있으면 텍스트를 애니메이션이 덮어쓰기 때문에,
-        // working이 꺼져있을 때만 즉시 반영
-        if (!workingOn) {
-          $("#voiceStatusText").text(lastVoiceMessage || "-");
-        }
-
-        // "감지!"가 들어오면, working이 true로 바뀔 때 2초 뒤 애니메이션 시작하게 준비
-        // (working 플래그는 main이 올림)
-      }
+      // 추천 수 표시. 빈 문자열도 그대로 반영해 SAMPLING 진입 시 이전 게임 잔류 방지.
+      $("#aiMoveDisplay").val(msg.ai_suggested_move || "");
 
       // verification 모드
-      verificationOn = (data.verification === true);
+      verificationOn = (msg.verification === true);
 
       if (verificationOn) {
         $("#verification-group").fadeIn();
         $("#status").text("인식 결과 확인 중. O 또는 X를 눌러주세요.");
 
         // 핵심: verification 중에는 final_board만 표시
-        if (!isManualMode && data.final_board && typeof data.final_board === "object") {
-          const convertedPos = convertToJS(data.final_board);
+        if (!isManualMode && msg.final_board
+            && Array.isArray(msg.final_board.squares)
+            && Array.isArray(msg.final_board.pieces)
+            && msg.final_board.squares.length === msg.final_board.pieces.length
+            && msg.final_board.squares.length > 0) {
+          const finalDict = {};
+          for (let i = 0; i < msg.final_board.squares.length; i++) {
+            finalDict[msg.final_board.squares[i]] = msg.final_board.pieces[i];
+          }
+          const convertedPos = convertToJS(finalDict);
           board.position(convertedPos);
         }
       } else {
@@ -293,7 +300,7 @@
       }
 
       // working 모드 (로봇 동작 중)
-      if (data.working === true) {
+      if (msg.working === true) {
         if (!workingOn) {
           workingOn = true;
           // 감지! 다음 단계로 작동 중...을 2초 후부터 표시
@@ -303,6 +310,22 @@
         if (workingOn) {
           stopWorkingAnimation();
           // working 종료 시, 마지막 voice_message로 복귀
+          $("#voiceStatusText").text(lastVoiceMessage || "-");
+        }
+      }
+    });
+
+    // Firebase ui_control listener: voice_message만 잔존 (D4에서 dead field 제거 예정).
+    onValue(controlRef, (snapshot) => {
+      const data = snapshot.val();
+      if (!data) return;
+
+      if (typeof data.voice_message === "string") {
+        lastVoiceMessage = data.voice_message;
+
+        // working 애니메이션이 돌고 있으면 텍스트를 애니메이션이 덮어쓰기 때문에,
+        // working이 꺼져있을 때만 즉시 반영
+        if (!workingOn) {
           $("#voiceStatusText").text(lastVoiceMessage || "-");
         }
       }

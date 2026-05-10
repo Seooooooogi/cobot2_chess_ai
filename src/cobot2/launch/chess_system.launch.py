@@ -71,7 +71,8 @@ def generate_launch_description():
             respawn=True,
             parameters=[{
                 'port': 9090,
-                'topics_glob': '[/vision/*]',
+                # Phase 5 sub-phase D1: UI가 /main_controller/ui_status 토픽 구독
+                'topics_glob': '[/vision/*, /main_controller/ui_status]',
                 'services_glob': '[/rosapi/*]',
                 'actions_glob': '[]',
             }],

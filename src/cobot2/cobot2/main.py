@@ -12,6 +12,10 @@ ROS2 Interfaces:
     Subscriber: Topic ``vision/board_state`` (cobot2_interfaces/msg/BoardState) —
                 RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). Cached latest is used as the
                 board snapshot for SAMPLING and as the live fallback in RUNNING.
+    Publisher:  Topic ``ui_status`` (cobot2_interfaces/msg/UIStatus) —
+                RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). main → UI 상태 토픽
+                (Phase 5 sub-phase D1). FSM 전이 + verification/working/ai_suggested_move
+                업데이트 시 latched publish.
     Client: Service ``StockfishMove``      (cobot2_interfaces/StockfishMove)
     Client: Action  ``move_chess_piece``  (cobot2_interfaces/MoveChessPiece)
 
@@ -30,9 +34,10 @@ Issues (Phase 1-1 doc Node 1):
     - M1-3 RESOLVED 2026-05-01: ``FIREBASE_SERVICE_ACCOUNT_JSON`` env-ized via ``FIREBASE_SERVICE_ACCOUNT_PATH`` env var; ``FIREBASE_DB_URL`` via ``FIREBASE_DATABASE_URL`` env var.
     - M1-1 RESOLVED 2026-05-04: ``~/start_sampling`` (Trigger) 로 대체.
     - ~~M1-2: pub/sub QoS 미명시 (Rule 4)~~ **RESOLVED 2026-05-04**: voice 제거로 pub/sub 0건. service/action endpoint에 ``qos_profile_services_default`` / ``qos_profile_action_status_default`` 명시 (line 234-256).
-    - M1-4 PARTIAL Phase 5 sub-phase B 2026-05-10: vision→main bus migrated to ROS2 topic
-      ``vision/board_state`` (TRANSIENT_LOCAL). UI↔main control flow still on Firebase
-      (``ui_control``, ``chess_system``) — closed in sub-phases C/D.
+    - M1-4 PARTIAL Phase 5 sub-phase D1 2026-05-10: vision→main + main→UI status
+      migrated to ROS2 (``vision/board_state``, ``ui_status``). UI→main user_decision
+      흐름과 ``chess_system`` parameter는 sub-phase D2/D3에서 처리. Firebase
+      ``board_state.set()`` write는 D1에서 제거 — UI는 ROS2 vision 토픽 직접 구독.
     - MINOR M1-5: workflow threads use ``time.sleep`` polling on Futures inside ``_call_stockfish`` and ``_send_robot_action_and_wait`` — Future callbacks preferred.
     - M1-6 RESOLVED 2026-05-04: Service 로 대체 — voice_control_node 미실행 무한 대기 해소.
     - M1-7 RESOLVED 2026-05-04: voice_status pub 제거 (옵션 a) — dead pub 해소.
@@ -60,7 +65,7 @@ from std_srvs.srv import Trigger
 import firebase_admin
 from firebase_admin import credentials, db
 
-from cobot2_interfaces.msg import BoardState
+from cobot2_interfaces.msg import BoardState, UIStatus
 from cobot2_interfaces.srv import StockfishMove
 from cobot2_interfaces.action import MoveChessPiece
 
@@ -77,6 +82,19 @@ CHESS_SYSTEM_PATH = "chess/chess_system"
 # Relative topic name (Rule 5); resolves under main_controller's namespace.
 VISION_BOARD_STATE_TOPIC = "vision/board_state"
 VISION_RECEIVE_TIMEOUT_SEC = 3.0
+
+# Phase 5 sub-phase D1: main → UI 상태 토픽. ``~`` private namespace prefix —
+# 노드명(main_controller) 하위로 풀려 ``/main_controller/ui_status`` 경로가 됨.
+# Rule 5 준수 (절대 경로 하드코딩 없음).
+UI_STATUS_TOPIC = "~/ui_status"
+
+# FSM 문자열 → UIStatus.STATE_* uint8 매핑. 신규 상태 추가 시 동기화 필요.
+_STATE_NAME_TO_UINT = {
+    "IDLE": UIStatus.STATE_IDLE,
+    "SAMPLING": UIStatus.STATE_SAMPLING,
+    "WAIT_DECISION": UIStatus.STATE_WAIT_DECISION,
+    "RUNNING": UIStatus.STATE_RUNNING,
+}
 
 STOCKFISH_SERVICE_NAME = "StockfishMove"
 SERVICE_TIMEOUT_SEC = 20.0
@@ -217,6 +235,14 @@ class MainController(Node):
             board_state_qos,
         )
 
+        # UIStatus publisher (Phase 5 sub-phase D1). 페이지 로드 직후 latched 메시지로
+        # 최신 상태 즉시 전달 — board_state QoS와 동일.
+        self.ui_status_pub = self.create_publisher(
+            UIStatus,
+            UI_STATUS_TOPIC,
+            board_state_qos,
+        )
+
         self.ai_client = self.create_client(
             StockfishMove,
             STOCKFISH_SERVICE_NAME,
@@ -249,7 +275,17 @@ class MainController(Node):
         self._state = "IDLE"
         self._job_id = ""
 
+        # UIStatus tracking fields (write 보호: _state_lock).
+        # FSM 전이 / 작업 진행 시점에 갱신 후 _publish_ui_status() 호출.
+        self._verification = False
+        self._working = False
+        self._ai_suggested_move = ""
+        self._final_board: dict = {}
+
         self.timer = self.create_timer(DECISION_POLL_SEC, self._poll_ui_decision)
+
+        # 초기 IDLE 상태 latched publish — 페이지 로드 직후 UI 동기화.
+        self._publish_ui_status()
 
         self.get_logger().info("MainController ready. Service: /main_controller/start_sampling (std_srvs/Trigger).")
 
@@ -288,6 +324,42 @@ class MainController(Node):
             assert self._latest_board_state is not None
             return dict(self._latest_board_state)
 
+    def _publish_ui_status(self) -> None:
+        """Snapshot tracking fields under ``_state_lock`` and publish UIStatus.
+
+        모든 FSM 전이 / verification·working·ai_suggested_move·final_board 업데이트
+        직후 호출. 락은 read 동안만 잡고 publish() 자체는 락 밖에서 실행 — rclpy
+        publisher는 thread-safe.
+        """
+        msg = UIStatus()
+        stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = stamp
+        msg.header.frame_id = ""
+
+        with self._state_lock:
+            state_name = self._state
+            # 신규 FSM 상태 추가 시 _STATE_NAME_TO_UINT 동기화 누락 시에도 worker thread가
+            # 죽지 않도록 IDLE로 fallback. 매핑 누락은 외부에 명시.
+            msg.controller_state = _STATE_NAME_TO_UINT.get(state_name, UIStatus.STATE_IDLE)
+            msg.verification = self._verification
+            msg.working = self._working
+            msg.ai_suggested_move = self._ai_suggested_move
+            msg.job_id = self._job_id
+            board_items = sorted(self._final_board.items())
+
+        if state_name not in _STATE_NAME_TO_UINT:
+            self.get_logger().error(
+                f"_publish_ui_status: unknown FSM state '{state_name}' "
+                "→ fallback IDLE in UIStatus. _STATE_NAME_TO_UINT 동기화 필요."
+            )
+
+        msg.final_board.header.stamp = stamp
+        msg.final_board.header.frame_id = "chess_board"
+        msg.final_board.squares = [k for k, _ in board_items]
+        msg.final_board.pieces = [v for _, v in board_items]
+        msg.final_board.piece_count = len(board_items)
+        self.ui_status_pub.publish(msg)
+
     def _reset_ui_for_new_job(self, job_id: str):
         try:
             self.fb.update_ui_control(UI_CONTROL_PATH, {
@@ -320,8 +392,13 @@ class MainController(Node):
                 return response
             self._state = "SAMPLING"
             self._job_id = now_iso_ms()
+            self._verification = False
+            self._working = False
+            self._ai_suggested_move = ""
+            self._final_board = {}
             job_id = self._job_id
 
+        self._publish_ui_status()
         self.get_logger().info(f"[start_sampling] triggered. job_id={job_id}")
         self._reset_ui_for_new_job(job_id)
         t = threading.Thread(
@@ -342,9 +419,10 @@ class MainController(Node):
             - Receives the latched ``vision/board_state`` message (TRANSIENT_LOCAL) within
               ``VISION_RECEIVE_TIMEOUT_SEC``. Single source of truth from vision node —
               vision is responsible for any internal smoothing / sample voting.
-            - Writes the captured board back to Firebase ``chess/board_state`` (UI mirror,
-              removed in sub-phase E).
-            - Sets ``ui_control.verification = True`` and uploads ``final_board``.
+            - Writes ``ui_control.verification = True`` to Firebase + publishes
+              ``UIStatus`` (verification=True, final_board, controller_state=WAIT_DECISION).
+              Firebase ``chess/board_state.set()`` write removed in sub-phase D1 — UI consumes
+              ``/vision/board_state`` directly.
             - On success: transitions ``self._state`` to ``WAIT_DECISION``.
             - On exception (incl. ``TimeoutError`` if vision is silent): transitions back to ``IDLE``.
         """
@@ -358,8 +436,7 @@ class MainController(Node):
             self.get_logger().info(f"[SAMPLING] done. final pieces={len(final_dict)}")
             self.get_logger().info("[UI] uploading final_board and enabling verification")
 
-            self.fb.set_board_state(BOARD_STATE_PATH, final_dict, extra={"source": "main_final_dict"})
-
+            # sub-phase D1: chess/board_state.set() 제거 — UI는 ROS2 /vision/board_state 구독.
             self.fb.update_ui_control(UI_CONTROL_PATH, {
                 "verification": True,
                 "user_decision": DECISION_NONE,
@@ -372,12 +449,20 @@ class MainController(Node):
 
             with self._state_lock:
                 self._state = "WAIT_DECISION"
+                self._verification = True
+                self._working = False
+                self._final_board = dict(final_dict)
+            self._publish_ui_status()
 
         except Exception as e:
             self.get_logger().error(f"Failed to make/publish final_dict: {e}")
             with self._state_lock:
                 self._state = "IDLE"
                 self._job_id = ""
+                self._verification = False
+                self._working = False
+                self._final_board = {}
+            self._publish_ui_status()
 
     def _poll_ui_decision(self):
         with self._state_lock:
@@ -397,7 +482,7 @@ class MainController(Node):
                 corrected = ui.get("corrected_board")
                 if isinstance(corrected, dict):
                     self.get_logger().info("[UI] corrected_board received. updating final_board")
-                    self.fb.set_board_state(BOARD_STATE_PATH, corrected, extra={"source": "manual_corrected"})
+                    # sub-phase D1: chess/board_state.set() 제거 — UI는 ROS2 토픽 사용.
                     self.fb.update_ui_control(UI_CONTROL_PATH, {
                         "final_board": corrected,
                         "corrected_board": None,
@@ -405,6 +490,9 @@ class MainController(Node):
                         "timestamp": datetime.now().isoformat(),
                         "job_id": job_id,
                     })
+                    with self._state_lock:
+                        self._final_board = dict(corrected)
+                    self._publish_ui_status()
                 else:
                     self.fb.update_ui_control(UI_CONTROL_PATH, {
                         "user_decision": DECISION_NONE,
@@ -428,6 +516,9 @@ class MainController(Node):
                 if self._state != "WAIT_DECISION":
                     return
                 self._state = "RUNNING"
+                self._verification = False
+                self._working = True
+            self._publish_ui_status()
 
             t = threading.Thread(target=self._job_stockfish_then_robot_then_wakeup, args=(job_id,), daemon=True)
             t.start()
@@ -496,6 +587,9 @@ class MainController(Node):
                     })
                 except Exception:
                     pass
+                with self._state_lock:
+                    self._ai_suggested_move = GAME_OVER_TEXT
+                self._publish_ui_status()
                 return
 
             self.fb.update_ui_control(UI_CONTROL_PATH, {
@@ -504,6 +598,9 @@ class MainController(Node):
                 "command": CMD_IDLE,
                 "job_id": job_id,
             })
+            with self._state_lock:
+                self._ai_suggested_move = best_move
+            self._publish_ui_status()
 
             ok = self._send_robot_action_and_wait(best_move, board_dict)
             if not ok:
@@ -524,6 +621,9 @@ class MainController(Node):
             with self._state_lock:
                 self._state = "IDLE"
                 self._job_id = ""
+                self._working = False
+                self._verification = False
+            self._publish_ui_status()
 
     def _call_stockfish(self, board_dict: dict, depth: int, difficulty: int, turn: str) -> str:
         if not self.ai_client.wait_for_service(timeout_sec=SERVICE_TIMEOUT_SEC):

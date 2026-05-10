@@ -14,6 +14,7 @@ find_package(action_msgs REQUIRED)
 # 메시지 / 서비스 / 액션 파일 정의
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BoardState.msg"
+  "msg/UIStatus.msg"
   "srv/StockfishMove.srv"
   "action/MoveChessPiece.action"
   DEPENDENCIES std_msgs action_msgs
