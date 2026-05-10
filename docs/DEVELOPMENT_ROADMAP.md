@@ -68,7 +68,7 @@
 |----|------|------|------|----------|
 | R1-1 | 모듈 수준 gripper Modbus 연결 | `robot_action.py` | ✅ RESOLVED | `ccff5d0` |
 | R1-2 | goal_callback 검증 부재 (Rule 7) | `robot_action.py` | ✅ RESOLVED | `8c4dcd4` |
-| R1-3 | TOOLCHARGER_IP/PORT 하드코딩 (Rule 8) | `robot_action.py:26-27` | ⚪ **OPEN** | — |
+| R1-3 | TOOLCHARGER_IP/PORT 하드코딩 (Rule 8) | `robot_action.py:26-27` | ◐ **DEFERRED** (의식적 유지, 2026-05-10) | — |
 | R1-4 | Modbus 단절 페일세이프 (Rule 9 ⚠) | `robot_action.py` | ⚪ **OPEN** | — |
 | R1-5 | 액션 서버 QoS 미명시 (Rule 4) | `robot_action.py` | ✅ RESOLVED | `f6a4955` |
 | R1-8 | 미사용 feedback_msg 제거 | `robot_action.py` | ✅ RESOLVED | `fbacec1` |
@@ -91,8 +91,8 @@
 
 ### Phase 4 잔여 (Phase 5 진입 전 처리)
 
-- **R1-3** TOOLCHARGER_IP / TOOLCHARGER_PORT 환경변수화. Rule 8 (확장성) 위반. `robot_action.py:26-27`.
-- **R1-4** Modbus 단절 시 페일세이프 (E-stop 또는 hold) 정의. **Rule 9 Tier 0 동급 안전**.
+- ~~**R1-3** TOOLCHARGER_IP / TOOLCHARGER_PORT 환경변수화. Rule 8 (확장성) 위반.~~ **DEFERRED 2026-05-10** — 사용자 결정으로 하드코딩 유지. 이유: 단일 호스트 + 고정 그리퍼 IP 시나리오에서 환경변수화 이득 < 변경 비용. Phase 6 실기 다호스트 확장 시 재검토.
+- **R1-4** Modbus 단절 시 페일세이프 (E-stop 또는 hold) 정의. **Rule 9 Tier 0 동급 안전**. 옵션 검토 진행 중 (대화 참조).
 
 ### Phase 4 OPEN → Phase 5에서 자동 RESOLVED
 
@@ -211,6 +211,8 @@
 - **C 채택**: 다개발자 / CI 도입 / GPU 박스 분리. **Phase 7 신설** 권장 (Phase 5/6 venv로 마치고 컨테이너화는 독립 트랙).
 
 **Default 가정**: A (venv). 변경 시 Phase 5 sub-phase A 재설계 필요.
+
+**결정 (2026-05-10)**: **A 채택**. Phase 5 sub-phase A는 `vision_db.py`에 `rclpy.Node` 상속 + `/vision/board_state` Publisher 추가 (단순). B/C는 Phase 6 또는 그 이후 별도 트랙으로 재검토 가능.
 
 ### Other
 
