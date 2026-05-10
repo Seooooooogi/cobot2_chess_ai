@@ -5,8 +5,8 @@ ROS2 node:
     Publishes recognized board state on ``/vision/board_state`` (``cobot2_interfaces/msg/BoardState``)
     using QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) so late-joining subscribers
     (e.g. ``main`` node, web UI via ``rosbridge_websocket``) receive the most recent value.
-    Firebase Realtime DB write is preserved during the migration (sub-phase A) so existing
-    ``main.py`` ``chess/board_state`` consumers keep working until sub-phase B/E remove them.
+    Phase 5 sub-phase E (2026-05-10): Firebase dual-write 제거. ROS2 토픽이 단일
+    publish 채널.
 
 Pipeline (``VisionNode.run``):
     OpenCV ``VideoCapture(SOURCE)``
@@ -14,7 +14,7 @@ Pipeline (``VisionNode.run``):
       → grid polygon hit-test (``load_chess_grid``)
       → HSV V-channel threshold → piece color
       → ResNet18 classifier (6 chess piece classes) → ``WP``/``BR``/...
-      → ``board_dict`` → ROS2 ``/vision/board_state`` publish + Firebase ``chess/board_state``
+      → ``board_dict`` → ROS2 ``/vision/board_state`` publish
 
 ROS2 parameters (declared in ``VisionNode.__init__``):
     - ``analyze_interval_sec``        (double, default 0.20) — minimum gap between YOLO+ResNet runs.
@@ -28,11 +28,10 @@ External Dependencies (env vars):
     - ResNet weights: ``RESNET_PATH`` (``RESNET_MODEL_PATH`` env var, required).
     - Grid JSON:      ``GRID_PATH``  (``CHESS_GRID_PATH`` env var, required).
     - Camera:         ``SOURCE`` (``CAMERA_SOURCE`` env var, default ``3``).
-    - Firebase:       ``FIREBASE_SERVICE_ACCOUNT_PATH``; ``FIREBASE_DATABASE_URL`` env vars.
 
 Issues (Phase 1-1 doc Node 4):
     - V1-1 RESOLVED 2026-05-10 (Phase 5 sub-phase A): node now subclasses ``rclpy.node.Node`` and publishes
-      ``/vision/board_state``. Firebase dual-write retained until sub-phase E removes Firebase coupling.
+      ``/vision/board_state``. Firebase dual-write 잔존했으나 sub-phase E에서 일괄 제거 (2026-05-10).
     - V1-2 RESOLVED 2026-05-01: model paths env-ized.
     - V1-4 RESOLVED 2026-05-01: ``CAMERA_SOURCE`` env var.
     # verify needed V1-7: piece-color HSV V-channel thresholds (80, 105) — robustness across lighting.
@@ -50,9 +49,6 @@ import json
 import os
 import time
 from datetime import datetime
-
-import firebase_admin
-from firebase_admin import credentials, db
 
 import rclpy
 from rclpy.node import Node
@@ -72,11 +68,6 @@ SAVE_DIR = "./captured_boards"
 CLASS_NAMES = ["Pawn", "Rook", "Knight", "Bishop", "Queen", "King"]
 CLASS_ABBR = {"Pawn": "P", "Rook": "R", "Knight": "N", "Bishop": "B", "Queen": "Q", "King": "K"}
 
-# ===== Firebase 설정 (env 주입) =====
-FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
-FIREBASE_DB_URL = os.getenv("FIREBASE_DATABASE_URL", "https://chess-43355-default-rtdb.asia-southeast1.firebasedatabase.app")
-FIREBASE_DB_PATH = "chess/board_state"
-
 # 디버그 저장 (원하면 True)
 SAVE_EACH_ANALYSIS_FRAME = False
 
@@ -87,17 +78,6 @@ BOARD_STATE_TOPIC = "vision/board_state"
 
 def now_iso_ms() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
-
-
-def init_firebase():
-    if firebase_admin._apps:
-        return
-    if not FIREBASE_SERVICE_ACCOUNT_JSON:
-        raise RuntimeError(
-            "FIREBASE_SERVICE_ACCOUNT_PATH env var not set; cannot initialize Firebase"
-        )
-    cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_JSON)
-    firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DB_URL})
 
 
 def load_chess_grid(json_path):
@@ -236,18 +216,6 @@ def normalize_board_dict(d):
     return {str(k): str(v) for k, v in sorted(d.items(), key=lambda x: x[0])}
 
 
-def update_firebase_board(ref, board_dict):
-    # ``chess/board_state`` is the *current-state* snapshot (live mirror), not an audit log.
-    # Hard Rule #6 (append-only Firebase logs) targets game/event records (e.g. moves, results),
-    # not this overwrite-by-design current-state path. Sub-phase E removes this dual-write entirely.
-    payload = {
-    "updated_at": now_iso_ms(),
-    "piece_count": len(board_dict),
-    "board": board_dict
-    }
-    ref.set(payload)
-
-
 class VisionNode(Node):
     """ROS2 node wrapping the camera + inference loop.
 
@@ -294,9 +262,6 @@ class VisionNode(Node):
             BoardState, BOARD_STATE_TOPIC, board_state_qos
         )
 
-        init_firebase()
-        self.firebase_ref = db.reference(FIREBASE_DB_PATH)
-
         self.cap = None
         self.yolo_model = None
         self.resnet_model = None
@@ -335,7 +300,7 @@ class VisionNode(Node):
             raise RuntimeError(f"Camera open failed (source={SOURCE})")
 
         self.get_logger().info(
-            f"Vision running. Publishing on {BOARD_STATE_TOPIC} + Firebase {FIREBASE_DB_PATH}. Press Q to quit."
+            f"Vision running. Publishing on {BOARD_STATE_TOPIC}. Press Q to quit."
         )
 
         last_analyze_ts = 0.0
@@ -385,7 +350,6 @@ class VisionNode(Node):
 
                 if should_send and (now_ts - last_publish_ts) >= self.publish_min_interval_sec:
                     self._publish_board_state(board_norm, capture_stamp)
-                    update_firebase_board(self.firebase_ref, board_norm)
                     last_publish_ts = now_ts
                     last_sent_board = board_norm
                     self.get_logger().info(
