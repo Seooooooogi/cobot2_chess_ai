@@ -69,7 +69,18 @@
 
 2. **엔진 설정 (Rule 8)**: `chess/chess_system` (depth/difficulty/turn) → stockfish 노드의 ROS2 declared parameters. UI는 rosbridge `set_parameters` API 호출. 메시지가 아닌 노드 파라미터로 표현 — 환경 의존 값은 parameter라는 Rule 8 원칙 부합.
 
-3. **영속 로그 분리** (Hard Rule #6 충족): 신규 ROS2 노드 `game_logger.py`가 `/vision/board_state`, `/chess/ui_status`, `/chess/move_executed`, `/chess/game_event`를 구독하여 SQLite (`~/.local/share/cobot2_chess_ai/game_log.db`)에 append-only 기록. 스키마 3 테이블 (`events`, `moves`, `games`). WAL 모드 + atomic transaction. UPDATE/DELETE 금지 코드 enforce.
+3. **영속 로그 분리** (Hard Rule #6 충족): 신규 ROS2 노드 `game_logger.py`가 `/vision/board_state`, `/main_controller/ui_status`, `/main_controller/game_event`를 구독하여 SQLite (`~/.local/share/cobot2_chess_ai/game_log.db`)에 append-only 기록. 스키마 4 테이블 (`games`, `game_results`, `moves`, `events`). WAL 모드 + SQLite TRIGGER 8개로 UPDATE/DELETE 스키마 레벨 차단 (코드 컨벤션이 아닌 강제). `move_executed`는 별도 토픽 신설 대신 `GameEvent.KIND_AI_MOVE`로 통합 — 토픽 표면 최소화.
+
+   **2026-05-10 Rule 5 정정**: 초안의 `/chess/move_executed`, `/chess/game_event`, `/chess/ui_status`는 기능 분류 글로벌 네임스페이스로 Rule 5 위반. 실제 구현은 발행자 노드 namespace 하위로 정정 — `~/ui_status` (main_controller), `~/game_event` (main_controller). 코드는 처음부터 정정된 형태로 머지됨.
+
+   **SQLite 스키마 (구현 완료)**:
+   ```sql
+   games          (game_id PK, started_at)               -- INSERT-only
+   game_results   (game_id PK FK, ended_at, result)      -- INSERT-only, 게임당 1행
+   moves          (id PK, game_id FK, ply, uci, side, fen, ts_ros)
+   events         (id PK, ts_ros, ts_wall, game_id, kind, payload_json)
+   -- + 8 TRIGGER (no_update_*, no_delete_*) for append-only enforcement
+   ```
 
 4. **인증/접근 범위**: LAN only 가정. rosbridge_server 무인증. 외부 노출 요구 시 별도 nginx + WSS + auth 검토 (본 ADR 범위 외).
 
@@ -99,3 +110,13 @@
 - **Reversal cost**: high — UI/main/vision 3 컴포넌트 코드 변경 + 인터페이스 파일 신규 (`BoardState.msg`, `UserDecision.srv`, `CorrectBoard.srv`). Sub-phase 단위 점진이므로 단일 단계 롤백은 가능.
 
 - **Open subordinate decision**: YOLO inference runtime — venv (현 default) / Docker 하이브리드 / 풀 컨테이너 중 결정 보류. Phase 5 sub-phase A 구현 형태에 영향 (ROADMAP Open Decisions 참조).
+
+**Status (2026-05-10): IMPLEMENTED** — Phase 5 sub-phase A→E 모두 master에 머지.
+- A (vision_db ROS2 node + BoardState.msg): commit b46a1b6.
+- B (main board_state subscriber): commit 3653be8.
+- C (rosbridge_websocket + UI roslibjs): commit 1a3b428.
+- D1 (UIStatus topic + board_state.set 제거): commit 830284e.
+- D2 (UserDecision Service): commit 620a34b.
+- D3 (stockfish parameter 단일 경로): commit e80407e.
+- D4 (voice_message dead field): commit 4ca3cf4.
+- E (Firebase 일괄 제거 + game_logger + SQLite): 8 commits — GameEvent.msg, game_logger 노드, launch+setup, StockfishMove.fen 추가, main.py refactor, vision_db Firebase 제거, UI Firebase Web SDK 제거, .env+ADR 갱신.
