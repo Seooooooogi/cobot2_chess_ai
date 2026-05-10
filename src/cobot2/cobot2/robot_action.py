@@ -931,8 +931,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # rclpy.ok() 가드: SIGINT 시 상위 launch가 이미 context를 shutdown 한 경우
+        # 'rcl_shutdown already called' 트레이스를 회피. (PB-6 fix.)
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
