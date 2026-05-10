@@ -1,4 +1,4 @@
-"""Vision pipeline — chess piece recognition + ROS2 publish + Firebase write (entry point: ``ros2 run cobot2 object``).
+"""Vision pipeline — chess piece recognition + ROS2 publish (entry point: ``ros2 run cobot2 object``).
 
 ROS2 node:
     Subclass of ``rclpy.node.Node`` (V1-1 RESOLVED 2026-05-10, Phase 5 sub-phase A).

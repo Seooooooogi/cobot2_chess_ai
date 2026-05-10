@@ -2,7 +2,7 @@
 
 Role:
     Coordinates the end-to-end chess turn:
-    sample board state → user verification (Firebase UI) → Stockfish best move → robot action.
+    sample board state → user verification (Web UI via rosbridge) → Stockfish best move → robot action.
     State machine: ``IDLE`` → ``SAMPLING`` → ``WAIT_DECISION`` → ``RUNNING`` → ``IDLE``
     (transitions guarded by ``self._state_lock``).
 
@@ -132,9 +132,10 @@ class MainController(Node):
     Triggers:
         - Service ``~/start_sampling`` (Trigger): IDLE → SAMPLING.
           Returns success=False with message="busy: state=<state>" if not IDLE.
-        - Firebase ``ui_control.user_decision == "APPROVED"`` (timer poll): WAIT_DECISION → RUNNING.
-        - Firebase ``ui_control.user_decision == "RE-CHECKED"`` (timer poll): stays in WAIT_DECISION,
-          updates ``final_board`` from ``corrected_board``.
+        - ``~/user_decision`` Service ``DECISION_APPROVED``: WAIT_DECISION → RUNNING.
+        - ``~/user_decision`` Service ``DECISION_RECHECKED``: stays in WAIT_DECISION,
+          updates ``final_board`` from ``corrected_board`` (Service Request 안에 BoardState).
+        - ``~/user_decision`` Service ``DECISION_GAME_OVER``: → IDLE + KIND_GAME_END 이벤트.
 
     Concurrency:
         ``self._state_lock`` (mutex) guards ``self._state`` and ``self._job_id``.
