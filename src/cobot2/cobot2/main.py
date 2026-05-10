@@ -103,9 +103,12 @@ _STATE_NAME_TO_UINT = {
     "RUNNING": UIStatus.STATE_RUNNING,
 }
 
-STOCKFISH_SERVICE_NAME = "StockfishMove"
+# Cross-node client paths (absolute) — owner는 stockfish.py의 chess_ai_node 노드.
+# stockfish.py가 사설 네임스페이스 `~/StockfishMove`로 등록 → 절대 경로
+# `/chess_ai_node/StockfishMove`. 같은 패턴 reset_chess_state. (PB-4 fix.)
+STOCKFISH_SERVICE_NAME = "/chess_ai_node/StockfishMove"
 SERVICE_TIMEOUT_SEC = 20.0
-RESET_CHESS_STATE_SERVICE_NAME = "reset_chess_state"
+RESET_CHESS_STATE_SERVICE_NAME = "/chess_ai_node/reset_chess_state"
 
 ROBOT_ACTION_NAME = "move_chess_piece"
 ROBOT_ACTION_SEND_TIMEOUT_SEC = 10.0

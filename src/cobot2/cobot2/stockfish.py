@@ -48,8 +48,11 @@ from cobot2_interfaces.srv import StockfishMove
 
 # ================= [기본 설정: 클래스보다 먼저 정의] =================
 STOCKFISH_PATH = os.getenv("STOCKFISH_PATH", "/usr/games/stockfish")
-SERVICE_NAME = "StockfishMove"
-RESET_SERVICE_NAME = "reset_chess_state"
+# 사설 네임스페이스(~/...) 사용 — 노드 코드 노드명 (chess_ai_node) 하위로 풀림.
+# Rule 5 (resource = node owns) 준수. 절대 경로(`/`로 시작) 또는 namespace-relative
+# (`StockfishMove`) 사용 금지 — 후자는 root namespace에 매핑됨 (PB-4 회귀 방지).
+SERVICE_NAME = "~/StockfishMove"
+RESET_SERVICE_NAME = "~/reset_chess_state"
 CHESS_AI_STATE_PATH = os.path.expanduser(
     os.getenv("CHESS_AI_STATE_PATH", "~/.local/share/cobot2_chess_ai/chess_state.json")
 )
