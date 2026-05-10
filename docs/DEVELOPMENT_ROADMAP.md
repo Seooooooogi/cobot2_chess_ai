@@ -180,9 +180,9 @@
 | **PB-1** | CRITICAL | ✅ RESOLVED (`ac60999`) | `chess_system.launch.py` `name=` 오버라이드 | 코드 `super().__init__("main_controller")` vs launch `name='chess_integration_node'` → `~/topic` 사설 네임스페이스가 `/chess_integration_node/...`로 풀림 (의도: `/main_controller/...`). 같은 패턴이 stockfish (`chess_ai_node`→`stockfish_node`) 등 다수. **수정**: launch에서 `name=` 5개 모두 제거 → 코드 노드명을 single source of truth로 신뢰. |
 | **PB-2** | CRITICAL | ✅ RESOLVED (PB-1 부산물) | `game_logger.py` 절대 경로 구독 | `/main_controller/game_event` + `/main_controller/ui_status` 하드코드 → 이전 publisher count 0, 현재 1. start_sampling 후 `games=1`, `game_event:GAME_START`, `USER_BOARD_CONFIRMED`, `ui_status×3` 정상 영속화 검증. |
 | **PB-3** | CRITICAL | ✅ RESOLVED (PB-1 부산물) | `chess_system.launch.py` rosbridge 화이트리스트 | `topics_glob`/`services_glob`의 `/main_controller/*` + `/chess_ai_node/*` 경로가 실제 존재 경로와 일치. UI ↔ ROS2 채널 정상. |
-| **PB-4** | MAJOR | ⚪ OPEN | `stockfish.py:97` | service path가 `/StockfishMove` (root namespace) 등록. Rule 5 위반 — `create_service(... "StockfishMove" ...)` 상대 경로가 namespace-relative이므로 root에 매핑됨. `~/StockfishMove`로 수정 권장 (단, main.py의 클라이언트도 동시 갱신 필요). |
-| **PB-5** | MAJOR | ⚪ OPEN | `vision_db.py:61` | `os.getenv("YOLO_MODEL_PATH")` None을 `YOLO()`에 직접 전달 → ultralytics가 `'None' does not exist` FileNotFoundError 후 launch respawn 무한 루프. **Rule 7 (fail-loud) 부분 위반**. |
-| **PB-6** | MINOR | ⚪ OPEN | `main.py` / `robot_action.py` shutdown | SIGINT 시 `rclpy.shutdown()` 명시 호출 + context already-shutdown 트레이스. 동작 무영향, 가드 권장. |
+| **PB-4** | MAJOR | ✅ RESOLVED (`12a866f`) | `stockfish.py:97` | service path가 `/StockfishMove` (root namespace) 등록. Rule 5 위반. **수정**: stockfish 측 `~/StockfishMove` + `~/reset_chess_state` 사설 네임스페이스 / main.py 측 cross-node 절대 경로 `/chess_ai_node/StockfishMove`. |
+| **PB-5** | MAJOR | ✅ RESOLVED (`84c9481`) | `vision_db.py:61` | env None 통과 → ultralytics respawn 루프. **수정**: `_load_models()` 시작 시 두 단계 검증 (None/empty + 경로 부재) → 명확한 RuntimeError. |
+| **PB-6** | MINOR | ✅ RESOLVED (`61718ba`) | `main.py` / `robot_action.py` shutdown | SIGINT 시 `rclpy.shutdown()` already-called 트레이스. **수정**: `if rclpy.ok():` 가드 (stockfish/vision_db/game_logger 패턴 적용). 트레이스 0건 검증. |
 
 **근본 원인 (PB-1~3 공통)**: launch가 코드의 노드명을 오버라이드해 sub-phase별 단위
 테스트(`ros2 run ... ` 직접 실행)와 통합 launch가 다른 노드명 공간을 사용. 단위
@@ -192,8 +192,8 @@
 → 코드의 `super().__init__(...)` 노드명을 single source of truth로 신뢰. 검증: 본
 baseline Step 4 재실행 시 `games >= 1` + 토픽 publisher count 정합.
 
-**Phase 6 진입 게이트 충족 (2026-05-10)**: PB-1~3 RESOLVED + baseline Step 5~7 재실행 PASS
-(`outputs/baseline/phase5-integration/05~07-*.log`). PB-4~6은 별도 트랙으로 진행 가능.
+**Phase 5 Known Issues 전부 RESOLVED (2026-05-10)**: PB-1~6 모두 마무리. 검증 로그
+`outputs/baseline/phase5-integration/{05..09}-*.log`.
 
 ---
 
