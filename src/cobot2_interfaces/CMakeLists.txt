@@ -15,6 +15,7 @@ find_package(action_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/BoardState.msg"
   "msg/UIStatus.msg"
+  "msg/GameEvent.msg"
   "srv/StockfishMove.srv"
   "srv/UserDecision.srv"
   "action/MoveChessPiece.action"
