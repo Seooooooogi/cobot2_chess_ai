@@ -1,8 +1,7 @@
 # cobot2_chess_ai
 
-ROS2 + 두산 M0609 협동로봇 기반 AI 체스 시스템. 비전(YOLO + ResNet18) → Stockfish 엔진 → 로봇 액션 → rosbridge WebSocket + SQLite 감사 로그 (Phase 5 완료, Firebase 의존 0).
-
-본 리포는 협동2 A-2 팀(박윤헌·김연빈·김하균·문규혁·서재우) 프로젝트의 **인계물**이며, 현 작업자는 원작자가 아니다. 따라서 작업 흐름은 **코드 매핑 → 주석 → 동작 검증 → 리팩토링** 순서를 따른다 (`CLAUDE.md` Dev Conventions).
+ROS2 + 두산 M0609 협동로봇 기반 AI 체스 시스템. 비전(YOLO + ResNet18) → Stockfish 엔진 → 로봇 액션 → rosbridge WebSocket + SQLite 감사 로그 (Phase 5 완료, Firebase 의존 0)
+현 작업자는 원작자가 아니다. 따라서 작업 흐름은 **코드 매핑 → 주석 → 동작 검증 → 리팩토링** 순서를 따른다 (`CLAUDE.md` Dev Conventions).
 
 ## Status
 
@@ -176,14 +175,3 @@ ros2 service call /main_controller/start_sampling std_srvs/srv/Trigger {}
 ### 보안 (carry over)
 
 - `.env` 노출 사고 발생 → 키 회전 권장 (`.claude/memory/session-handoff-LATEST.md` 참조).
-
----
-
-## 6. 추가 문서
-
-- `CLAUDE.md` — Hard Rules, Quick Ref, Compact Instructions.
-- `.claude/memory/MEMORY.md` — 의미적 메모리 (단계, entry points, configs, 외부 의존성 요약).
-- `.claude/memory/session-handoff-LATEST.md` — 다음 세션 진입 정보 (Open Decisions, Remaining Issues).
-- `docs/DEVELOPMENT_ROADMAP.md` — Phase 0~6 계획 (Phase 5 완료, Phase 6 실기 검증 진입 가능).
-- `docs/decisions/README.md` — ADR 인덱스.
-- `outputs/verify-needed.md` — `# verify needed` 마커 통합 인덱스 (Phase 3 인풋).
