@@ -48,9 +48,11 @@ outputs/
 .vscode/
 .idea/
 
-# Claude Code (user-local state)
-.claude/settings.local.json
-.claude/memory/
+# Claude Code (user-local state) — 모든 Claude 관련 마크다운 untrack
+CLAUDE.md
+.claude/
+**/CLAUDE.md
+**/.claude/
 
 # Session lessons (user-local, evolves per session)
 tasks/lessons.md
