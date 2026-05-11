@@ -1,6 +1,6 @@
 # cobot2_chess_ai
 
-ROS2 + 두산 M0609 협동로봇 기반 AI 체스 시스템. 비전(YOLO + ResNet18) → Stockfish 엔진 → 로봇 액션 → Firebase Realtime DB(Web UI 연동).
+ROS2 + 두산 M0609 협동로봇 기반 AI 체스 시스템. 비전(YOLO + ResNet18) → Stockfish 엔진 → 로봇 액션 → rosbridge WebSocket + SQLite 감사 로그 (Phase 5 완료, Firebase 의존 0).
 
 본 리포는 협동2 A-2 팀(박윤헌·김연빈·김하균·문규혁·서재우) 프로젝트의 **인계물**이며, 현 작업자는 원작자가 아니다. 따라서 작업 흐름은 **코드 매핑 → 주석 → 동작 검증 → 리팩토링** 순서를 따른다 (`CLAUDE.md` Dev Conventions).
 
@@ -25,7 +25,7 @@ ROS2 + 두산 M0609 협동로봇 기반 AI 체스 시스템. 비전(YOLO + ResNe
   - `src/onrobot-ros2` — `c6e3903`
   - `src/m0609_rg2_bringup` — `7d6aa3c`
 - 외부 의존성 (자세히는 `docs/code-mapping/2026-05-01-phase1-3-external-deps.md`):
-  - `firebase-admin`, `stockfish` (PyPI), `ultralytics`, `torch`, `torchvision`, `opencv-python`, `pymodbus==2.5.3`
+  - `stockfish`, `ultralytics`, `torch`, `torchvision`, `opencv-python`, `pymodbus==2.5.3` (PyPI)
   - 시스템: `stockfish` 바이너리 (`/usr/games/stockfish`)
 
 ### 1.2 시크릿 / `.env`
@@ -35,10 +35,10 @@ ROS2 + 두산 M0609 협동로봇 기반 AI 체스 시스템. 비전(YOLO + ResNe
 ```bash
 cd /home/rokey/cobot2_chess_ai
 cp .env.example src/cobot2/.env
-# 그런 다음 src/cobot2/.env 안의 값들을 채운다 (Firebase JSON 절대경로, ROBOT_MODE 등)
+# 그런 다음 src/cobot2/.env 안의 값들을 채운다 (ROBOT_MODE, 모델 경로 등)
 ```
 
-`.env`, `*-firebase-adminsdk-*.json` 은 절대 커밋하지 않는다 (CLAUDE.md Hard Rule 5).
+`.env` 는 절대 커밋하지 않는다 (CLAUDE.md Hard Rule 5).
 
 ### 1.3 빌드
 
@@ -60,7 +60,7 @@ colcon build --packages-select cobot2 --symlink-install
 `ament_python` 빌드는 venv 인식이 없어 system python shebang을 박는다. 빌드 직후 패치:
 
 ```bash
-for ep in main stockfish robotaction object; do
+for ep in main stockfish robotaction object gamelogger; do
   sed -i "1s|^#!.*|#!/home/rokey/cobot2_chess_ai/.venv/bin/python|" \
     install/cobot2/lib/cobot2/$ep
 done
@@ -98,7 +98,8 @@ ros2 launch m0609_rg2_bringup bringup.launch.py mode:=real host:=192.168.1.100
 ```bash
 ros2 run cobot2 stockfish     # Stockfish 서비스 (cobot2/stockfish.py)
 ros2 run cobot2 robotaction   # Doosan M0609 + RG2 액션 서버 (cobot2/robot_action.py)
-ros2 run cobot2 object        # 비전 + Firebase 쓰기 (cobot2/vision_db.py — ROS2 노드 아님)
+ros2 run cobot2 object        # 비전 인식 + /vision/board_state publish (cobot2/vision_db.py)
+ros2 run cobot2 gamelogger    # SQLite 감사 로그 (cobot2/game_logger.py) — 선택
 ros2 run cobot2 main          # 워크플로 오케스트레이터 (cobot2/main.py)
 ```
 
@@ -120,17 +121,16 @@ ros2 service call /main_controller/start_sampling std_srvs/srv/Trigger {}
 
 | 키 | 용도 | 코드 참조 | 필수 여부 |
 |-----|------|-----------|-----------|
-| `FIREBASE_SERVICE_ACCOUNT_PATH` | Firebase admin SDK 인증 JSON 절대경로 | `vision_db.py:66`, `main.py:55` (Phase 4 2026-05-01 env-ize 완료) | vision/main 실행 시 필수 |
-| `FIREBASE_DATABASE_URL` | Firebase Realtime DB URL | `vision_db.py:67`, `main.py:56` (Phase 4 2026-05-01 env-ize 완료; default = 기존 하드코딩 URL) | 필수 (default 제공) |
-| `YOLO_MODEL_PATH` | YOLO 가중치 경로 | `vision_db.py:54` (Phase 4 2026-05-01 env-ize 완료) | vision 실행 시 필수 |
-| `RESNET_MODEL_PATH` | ResNet18 분류기 가중치 경로 | `vision_db.py:55` (Phase 4 2026-05-01 신규) | vision 실행 시 필수 |
-| `CHESS_GRID_PATH` | 체스 보드 grid JSON 절대경로 | `vision_db.py:56` (Phase 4 2026-05-01 신규) | vision 실행 시 필수 |
-| `CAMERA_SOURCE` | 카메라 인덱스 | `vision_db.py:57` (Phase 4 2026-05-01 신규; default `3`) | 선택 (default 3) |
+| `YOLO_MODEL_PATH` | YOLO 가중치 경로 | `vision_db.py` | vision 실행 시 필수 |
+| `RESNET_MODEL_PATH` | ResNet18 분류기 가중치 경로 | `vision_db.py` | vision 실행 시 필수 |
+| `CHESS_GRID_PATH` | 체스 보드 grid JSON 절대경로 | `vision_db.py` | vision 실행 시 필수 |
+| `CAMERA_SOURCE` | 카메라 인덱스 | `vision_db.py` (default `3`) | 선택 |
 | `DOOSAN_ROBOT_IP` | M0609 IP | bringup launch 인자 | 실기 모드 시 |
-| `ROBOT_MODE` | `virtual` 또는 `real` | `robot_action.py:31` | 권장 (default `virtual`) |
-| `LLM_CHESS_LOGIC_ENABLED` | LLM 체스 엔진 토글 | (Input Policy III 제외 대상) | OFF |
+| `ROBOT_MODE` | `virtual` 또는 `real` | `robot_action.py` | 권장 (default `virtual`) |
 | `LOG_LEVEL` | 로깅 수준 | (현재 미연결) | 선택 |
-| `STOCKFISH_PATH` | Stockfish 바이너리 경로 | (`stockfish.py:37` 하드코딩 — Phase 4 env-ize 후보) | 현재 미연결 |
+| `STOCKFISH_PATH` | Stockfish 바이너리 경로 | `stockfish.py` | 선택 (default `/usr/games/stockfish`) |
+| `CHESS_AI_STATE_PATH` | Stockfish 국면 상태 파일 경로 | `stockfish.py` | 선택 (default `~/.local/share/cobot2_chess_ai/chess_state.json`) |
+| `CHESS_AI_LOG_DB_PATH` | game_logger SQLite DB 경로 | `game_logger.py` | 선택 (default `~/.local/share/cobot2_chess_ai/game_log.db`) |
 
 
 ---
@@ -151,9 +151,9 @@ ros2 service call /main_controller/start_sampling std_srvs/srv/Trigger {}
 - 미검증 동작 단정 금지 (`CLAUDE.md` Hard Rule 1)
 - 리팩토링 전 baseline 기록 (Hard Rule 2)
 - virtual mode first (Hard Rule 3)
-- vision/Firebase 결측 명시적 표기 — 보간 금지 (Hard Rule 4)
+- vision 결측 명시적 표기 — 보간 금지 (Hard Rule 4)
 - 시크릿 하드코딩 금지 (Hard Rule 5)
-- Firebase 로그 append-only (Hard Rule 6)
+- game_logger SQLite append-only (Hard Rule 6 — TRIGGER로 스키마 레벨 보장)
 - git attribution에 AI 이름 추가 금지 (Hard Rule 7)
 - ROS2 Rule 9 (안전 신호 Topic 금지, 페일세이프 수렴) — `~/.claude/rules/ros2-principles.md`
 
@@ -184,6 +184,6 @@ ros2 service call /main_controller/start_sampling std_srvs/srv/Trigger {}
 - `CLAUDE.md` — Hard Rules, Quick Ref, Compact Instructions.
 - `.claude/memory/MEMORY.md` — 의미적 메모리 (단계, entry points, configs, 외부 의존성 요약).
 - `.claude/memory/session-handoff-LATEST.md` — 다음 세션 진입 정보 (Open Decisions, Remaining Issues).
-- `docs/DEVELOPMENT_ROADMAP.md` — Phase 0~4 계획.
+- `docs/DEVELOPMENT_ROADMAP.md` — Phase 0~6 계획 (Phase 5 완료, Phase 6 실기 검증 진입 가능).
 - `docs/decisions/README.md` — ADR 인덱스.
 - `outputs/verify-needed.md` — `# verify needed` 마커 통합 인덱스 (Phase 3 인풋).
