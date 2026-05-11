@@ -1,41 +1,41 @@
-"""Vision pipeline — chess piece recognition + ROS2 publish (entry point: ``ros2 run chess_ai object``).
+"""Vision 파이프라인 — 체스 기물 인식 + ROS2 publish (entry point: ``ros2 run chess_ai object``).
 
 ROS2 node:
-    Subclass of ``rclpy.node.Node`` (V1-1 RESOLVED 2026-05-10, Phase 5 sub-phase A).
-    Publishes recognized board state on ``/vision/board_state`` (``chess_ai_interfaces/msg/BoardState``)
-    using QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) so late-joining subscribers
-    (e.g. ``main`` node, web UI via ``rosbridge_websocket``) receive the most recent value.
+    ``rclpy.node.Node`` 서브클래스 (V1-1 RESOLVED 2026-05-10, Phase 5 sub-phase A).
+    인식된 보드 상태를 ``/vision/board_state`` (``chess_ai_interfaces/msg/BoardState``)에
+    QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)로 publish — 늦게 가입한 subscriber
+    (``main`` 노드, ``rosbridge_websocket`` 경유 Web UI 등)도 최신 값을 즉시 수신.
     Phase 5 sub-phase E (2026-05-10): Firebase dual-write 제거. ROS2 토픽이 단일
     publish 채널.
 
-Pipeline (``VisionNode.run``):
+파이프라인 (``VisionNode.run``):
     OpenCV ``VideoCapture(SOURCE)``
-      → YOLO inference (foot-point per box)
+      → YOLO inference (박스당 foot-point 추출)
       → grid polygon hit-test (``load_chess_grid``)
-      → HSV V-channel threshold → piece color
-      → ResNet18 classifier (6 chess piece classes) → ``WP``/``BR``/...
+      → HSV V-channel threshold → 기물 색상 판정
+      → ResNet18 classifier (6 클래스: Pawn/Rook/Knight/Bishop/Queen/King) → ``WP``/``BR``/...
       → ``board_dict`` → ROS2 ``/vision/board_state`` publish
 
-ROS2 parameters (declared in ``VisionNode.__init__``):
-    - ``analyze_interval_sec``        (double, default 0.20) — minimum gap between YOLO+ResNet runs.
-    - ``publish_min_interval_sec``    (double, default 0.20) — minimum gap between board_state publishes.
-    - ``only_publish_on_change``      (bool, default True)  — skip publish/write if normalized board unchanged.
-    - ``frame_id``                    (string, default ``chess_board``) — Header frame_id on published msgs.
-                                       # verify needed: ``chess_board`` is project-defined; not REP-105 covered.
+ROS2 parameters (``VisionNode.__init__``에서 declare):
+    - ``analyze_interval_sec``        (double, default 0.20) — YOLO+ResNet 추론 간 최소 간격(초).
+    - ``publish_min_interval_sec``    (double, default 0.20) — board_state publish 간 최소 간격(초).
+    - ``only_publish_on_change``      (bool, default True)  — 정규화된 보드가 동일하면 publish 생략.
+    - ``frame_id``                    (string, default ``chess_board``) — publish 메시지 Header.frame_id.
+                                       # verify needed: ``chess_board``는 프로젝트 정의 — REP-105 covered 아님.
 
-External Dependencies (env vars):
-    - YOLO weights:   ``YOLO_PATH``  (``YOLO_MODEL_PATH`` env var, required).
-    - ResNet weights: ``RESNET_PATH`` (``RESNET_MODEL_PATH`` env var, required).
-    - Grid JSON:      ``GRID_PATH``  (``CHESS_GRID_PATH`` env var, required).
+외부 의존성 (env vars):
+    - YOLO weights:   ``YOLO_PATH``  (``YOLO_MODEL_PATH`` env var, 필수).
+    - ResNet weights: ``RESNET_PATH`` (``RESNET_MODEL_PATH`` env var, 필수).
+    - Grid JSON:      ``GRID_PATH``  (``CHESS_GRID_PATH`` env var, 필수).
     - Camera:         ``SOURCE`` (``CAMERA_SOURCE`` env var, default ``3``).
 
 Issues (Phase 1-1 doc Node 4):
-    - V1-1 RESOLVED 2026-05-10 (Phase 5 sub-phase A): node now subclasses ``rclpy.node.Node`` and publishes
-      ``/vision/board_state``. Firebase dual-write 잔존했으나 sub-phase E에서 일괄 제거 (2026-05-10).
+    - V1-1 RESOLVED 2026-05-10 (Phase 5 sub-phase A): ``rclpy.node.Node`` 서브클래스화 +
+      ``/vision/board_state`` publish. Firebase dual-write 잔존 → sub-phase E에서 일괄 제거 (2026-05-10).
     - V1-2 RESOLVED 2026-05-01: model paths env-ized.
-    - V1-4 RESOLVED 2026-05-01: ``CAMERA_SOURCE`` env var.
-    # verify needed V1-7: piece-color HSV V-channel thresholds (80, 105) — robustness across lighting.
-    # verify needed V1-8: confirm ``CHESS_GRID_PATH`` env var points to valid ``chess_grid.json``.
+    - V1-4 RESOLVED 2026-05-01: ``CAMERA_SOURCE`` env var 도입.
+    # verify needed V1-7: piece-color HSV V-channel 임계값 (80, 105) — 조명 변동에 대한 robustness 미확인.
+    # verify needed V1-8: ``CHESS_GRID_PATH`` env var가 올바른 ``chess_grid.json``을 가리키는지 확인.
 """
 
 import cv2
@@ -81,20 +81,19 @@ def now_iso_ms() -> str:
 
 
 def load_chess_grid(json_path):
-    """Load grid polygons from ``chess_grid.json``.
+    """``chess_grid.json``에서 격자 폴리곤을 로드한다.
 
     Args:
-        json_path: str — path to JSON file with ``{"A1": [[x,y],...], ...}``.
+        json_path: str — ``{"A1": [[x,y],...], ...}`` 형식의 JSON 파일 경로.
 
     Returns:
-        dict[str, np.ndarray] — square name → polygon points reshaped to
-        ``(-1, 1, 2)`` int32 (the layout ``cv2.pointPolygonTest`` expects),
-        or ``None`` if the file does not exist.
+        dict[str, np.ndarray] — 칸 이름 → ``(-1, 1, 2)`` int32 폴리곤 점 배열
+        (``cv2.pointPolygonTest``가 요구하는 레이아웃). 파일 부재 시 ``None``.
 
     Notes:
-        # verify needed V1-8: ``GRID_PATH`` is now ``CHESS_GRID_PATH`` env var (Phase 4 env-ize 2026-05-01).
-        ``src/chess_ai/config/chess_grid.json`` and ``src/chess_ai/chess_ai/chess_grid.json`` exist (byte-identical, Phase 1-4) —
-        whether the env var points to the correct file is unverified.
+        # verify needed V1-8: ``GRID_PATH``는 현재 ``CHESS_GRID_PATH`` env var (Phase 4 env-ize 2026-05-01).
+        ``src/chess_ai/config/chess_grid.json``와 ``src/chess_ai/chess_ai/chess_grid.json``이 동시 존재
+        (byte-identical, Phase 1-4) — env var가 올바른 파일을 가리키는지 미검증.
     """
     if not os.path.exists(json_path):
         return None
@@ -104,23 +103,23 @@ def load_chess_grid(json_path):
 
 
 def get_piece_color_improved(img, box):
-    """Classify a detected piece as White / Black / Unknown via HSV V-channel threshold.
+    """검출된 기물의 색상을 HSV V채널 임계값으로 White / Black / Unknown 분류한다.
 
     Args:
-        img: BGR frame (np.ndarray).
-        box: ``(x1, y1, x2, y2)`` bounding box (any iterable of 4 numbers).
+        img: BGR 프레임 (np.ndarray).
+        box: ``(x1, y1, x2, y2)`` 바운딩 박스 (길이 4 iterable).
 
     Returns:
-        ``"White"``, ``"Black"``, or ``"Unknown"`` (when the ROI is empty).
+        ``"White"``, ``"Black"``, 또는 ROI가 비었을 때 ``"Unknown"``.
 
-    Method:
-        Crops the ROI to the band ``y ∈ [y1+0.2h, y1+0.4h]``, ``x ∈ [x1+0.42w, x1+0.58w]``
-        (upper-middle strip of the bounding box), converts to HSV, and inspects the V channel.
-        Returns ``"Black"`` if more than 30% of pixels have V < 80 *or* the median V < 105.
+    방법:
+        바운딩 박스의 상단 중앙 띠 ``y ∈ [y1+0.2h, y1+0.4h]``, ``x ∈ [x1+0.42w, x1+0.58w]``
+        를 ROI로 잘라 HSV로 변환 후 V채널을 검사한다.
+        V < 80 픽셀 비율이 30%를 넘거나 V 중앙값이 105 미만이면 ``"Black"``.
 
     Notes:
-        # verify needed V1-7: HSV V-channel thresholds (80, 105) and the strip percentages
-        (0.2, 0.4, 0.42, 0.58) are not validated for robustness across lighting conditions.
+        # verify needed V1-7: HSV V채널 임계값(80, 105)과 ROI 비율(0.2, 0.4, 0.42, 0.58)이
+        조명 변동에 대한 robustness 측면에서 검증되지 않음.
     """
     x1, y1, x2, y2 = map(int, box)
     w, h = x2 - x1, y2 - y1
@@ -148,28 +147,29 @@ def load_resnet_model(path):
 
 
 def analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, preprocess):
-    """Run YOLO + grid mapping + color + ResNet on a single frame, return board dict.
+    """단일 프레임에 YOLO + grid 매핑 + 색상 판정 + ResNet을 수행해 보드 dict을 반환한다.
 
     Args:
-        frame:          BGR camera frame.
-        yolo_model:     ``ultralytics.YOLO`` instance loaded from ``YOLO_PATH``.
-        resnet_model:   ResNet18 with 6-class final layer (Pawn/Rook/Knight/Bishop/Queen/King).
-        grid_polygons:  output of ``load_chess_grid`` or ``None`` (cells without grid → skipped).
-        device:         torch device for ResNet inference.
-        preprocess:     torchvision transform pipeline (Resize 224 → ToTensor → ImageNet Normalize).
+        frame:          BGR 카메라 프레임.
+        yolo_model:     ``YOLO_PATH``에서 로드한 ``ultralytics.YOLO`` 인스턴스.
+        resnet_model:   ResNet18 (6-class final layer: Pawn/Rook/Knight/Bishop/Queen/King).
+        grid_polygons:  ``load_chess_grid``의 결과 또는 ``None`` (격자 없으면 해당 칸 skip).
+        device:         ResNet 추론용 torch device.
+        preprocess:     torchvision transform 파이프라인 (Resize 224 → ToTensor → ImageNet Normalize).
 
     Returns:
-        dict[str, str] — mapping square name (``"A1"``..``"H8"``) → piece code (``"WP"``/``"BR"``/...).
-        Cells with no detected piece are absent from the dict.
+        dict[str, str] — 칸 이름 (``"A1"``..``"H8"``) → 기물 코드 (``"WP"``/``"BR"``/...) 매핑.
+        검출되지 않은 칸은 dict에서 누락된다.
 
     Side Effects:
-        None (pure function over the frame).
+        없음 (프레임에 대한 순수 함수).
 
-    Logic:
-        For each YOLO box: take the foot point ``((x1+x2)/2, y2)``, find the first grid polygon
-        containing it (``cv2.pointPolygonTest``), classify color via ``get_piece_color_improved``,
-        crop to RGB and run ResNet to pick a piece type, then write ``"{W|B}{P|R|N|B|Q|K}"``
-        into the corresponding cell. YOLO is invoked with ``conf=0.5, iou=0.3``.
+    동작:
+        각 YOLO 박스마다 foot point ``((x1+x2)/2, y2)``를 잡아 ``cv2.pointPolygonTest``로
+        포함하는 첫 grid 폴리곤을 찾고, ``get_piece_color_improved``로 색상 판정 후
+        RGB crop을 ResNet에 통과시켜 기물 종류를 결정한다.
+        결과는 ``"{W|B}{P|R|N|B|Q|K}"`` 코드로 해당 칸에 기록.
+        YOLO 인자: ``conf=0.5, iou=0.3``.
     """
     # YOLO 추론: confidence 0.5 이상, IoU 0.3 이하(중복 박스 억제)
     results = yolo_model(frame, conf=0.5, iou=0.3, verbose=False)
@@ -232,20 +232,18 @@ def normalize_board_dict(d):
 
 
 class VisionNode(Node):
-    """ROS2 node wrapping the camera + inference loop.
+    """카메라 + 추론 루프를 감싸는 ROS2 노드.
 
-    Publishes ``BoardState`` on the relative topic ``vision/board_state`` (resolves
-    to ``/vision/board_state`` at root namespace) with QoS RELIABLE + TRANSIENT_LOCAL
-    + KEEP_LAST(1). Firebase write is performed in parallel during sub-phase A
-    migration (removed in sub-phase E).
+    상대 토픽 ``vision/board_state`` (root namespace에서 ``/vision/board_state``로 풀림)에
+    QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)로 ``BoardState``를 publish한다.
+    sub-phase A 마이그레이션 기간엔 Firebase write 병행 → sub-phase E에서 제거됨.
 
-    Note on parameter dynamics:
-        ``run()`` is a blocking OpenCV loop with no ``rclpy.spin()``. Parameters
-        are read once in ``__init__`` and cached as instance attributes; runtime
-        ``ros2 param set`` calls are accepted by the parameter server but will
-        NOT take effect until the node restarts. ``add_on_set_parameters_callback``
-        is intentionally not wired (sub-phase A scope). A future sub-phase that
-        switches to a Timer + ``spin()`` model will re-enable dynamic params.
+    Parameter 동적 변경 주의:
+        ``run()``은 ``rclpy.spin()`` 없이 OpenCV 루프로 블로킹된다. Parameter는
+        ``__init__``에서 1회 읽어 인스턴스 속성에 캐시되며, 런타임 ``ros2 param set``은
+        parameter server엔 반영되나 노드 재시작 전엔 실제 동작에 적용되지 않는다.
+        ``add_on_set_parameters_callback``은 의도적으로 미연결 (sub-phase A 범위).
+        향후 Timer + ``spin()`` 모델로 전환되는 sub-phase에서 dynamic param 재활성.
     """
 
     def __init__(self):
@@ -285,8 +283,8 @@ class VisionNode(Node):
         self.preprocess = None
 
     def _publish_board_state(self, board_dict, capture_stamp):
-        # board_dict is expected to be the output of normalize_board_dict (already key-sorted),
-        # but we re-sort defensively so callers can pass any dict-like board.
+        # board_dict는 normalize_board_dict의 출력(이미 키 정렬됨)을 받지만,
+        # 임의 dict-like 입력도 받을 수 있도록 방어적으로 다시 정렬한다.
         msg = BoardState()
         msg.header.stamp = capture_stamp
         msg.header.frame_id = self.frame_id
@@ -340,7 +338,7 @@ class VisionNode(Node):
 
         self.cap = cv2.VideoCapture(SOURCE)
         if not self.cap.isOpened():
-            # Rule 7: 조용한 실패 방지. RuntimeError를 발생시켜 supervisor/launch가 관찰할 수 있도록.
+            # Rule 7 (silent failure 방지): RuntimeError로 supervisor/launch가 관찰 가능하게.
             raise RuntimeError(f"Camera open failed (source={SOURCE})")
 
         self.get_logger().info(
@@ -353,7 +351,7 @@ class VisionNode(Node):
 
         while rclpy.ok():
             ret, frame = self.cap.read()
-            # Rule 7: stamp = 측정 시점. cap.read() 직후 캡처.
+            # Rule 7 (stamp = 측정 시점): cap.read() 직후 stamp 캡처.
             capture_stamp = self.get_clock().now().to_msg()
             if not ret:
                 break

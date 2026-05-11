@@ -67,16 +67,18 @@ class RG():
         self.open_connection()
 
     def open_connection(self):
-        """Opens the connection with a gripper."""
+        """그리퍼와 Modbus TCP 연결을 연다."""
         self.client.connect()
 
     def close_connection(self):
-        """Closes the connection with the gripper."""
+        """그리퍼와 Modbus TCP 연결을 닫는다."""
         self.client.close()
 
     def get_fingertip_offset(self):
-        """Reads the current fingertip offset in 1/10 millimeters.
-        Please note that the value is a signed two's complement number.
+        """현재 fingertip offset 값을 mm 단위로 반환한다.
+
+        레지스터(address=258)에 저장된 값은 signed two's complement 16-bit 정수이며,
+        1/10 mm 단위 → mm 단위로 변환 후 반환한다.
         """
         result = self.client.read_holding_registers(
             address=258, count=1, unit=65)
@@ -84,9 +86,10 @@ class RG():
         return offset_mm
 
     def get_width(self):
-        """Reads current width between gripper fingers in 1/10 millimeters.
-        Please note that the width is provided without any fingertip offset,
-        as it is measured between the insides of the aluminum fingers.
+        """현재 그리퍼 손가락 간 간격(width)을 mm 단위로 반환한다.
+
+        주의: fingertip offset이 적용되지 않은 알루미늄 손가락 내측 간 거리.
+        offset 포함 값이 필요하면 ``get_width_with_offset()`` 사용.
         """
         result = self.client.read_holding_registers(
             address=267, count=1, unit=65)
@@ -94,9 +97,10 @@ class RG():
         return width_mm
 
     def get_status(self):
-        """Reads current device status.
-        This status field indicates the status of the gripper and its motion.
-        It is composed of 7 flags, described in the table below.
+        """현재 그리퍼 상태(7개 플래그)를 읽어서 리스트로 반환한다.
+
+        상태 레지스터(address=268)는 16-bit 비트 필드이며, 하위 7비트가 의미를 갖는다.
+        아래 표는 OnRobot RG 매뉴얼 원문 그대로 (vendor reference):
 
         Bit      Name            Description
         0 (LSB): busy            High (1) when a motion is ongoing,
@@ -154,8 +158,9 @@ class RG():
         return status_list
 
     def get_width_with_offset(self):
-        """Reads current width between gripper fingers in 1/10 millimeters.
-        The set fingertip offset is considered.
+        """현재 그리퍼 손가락 간 간격(width)을 fingertip offset 포함 mm 단위로 반환한다.
+
+        ``get_width()`` 와 달리 fingertip offset이 적용된 값 (address=275).
         """
         result = self.client.read_holding_registers(
             address=275, count=1, unit=65)
@@ -163,44 +168,35 @@ class RG():
         return width_mm
 
     def set_control_mode(self, command):
-        """The control field is used to start and stop gripper motion.
-        Only one option should be set at a time.
-        Please note that the gripper will not start a new motion
-        before the one currently being executed is done
-        (see busy flag in the Status field).
-        The valid flags are:
+        """control 레지스터(address=2)에 명령을 써서 그리퍼 동작을 제어한다.
 
-        1 (0x0001):  grip
-                      Start the motion, with the target force and width.
-                      Width is calculated without the fingertip offset.
-                      Please note that the gripper will ignore this command
-                      if the busy flag is set in the status field.
-        8 (0x0008):  stop
-                      Stop the current motion.
-        16 (0x0010): grip_w_offset
-                      Same as grip, but width is calculated
-                      with the set fingertip offset.
+        한 번에 하나의 옵션만 설정해야 하며, 이전 동작이 끝나지 않았다면
+        (status의 busy=1) 새 명령은 무시된다. 유효 flag:
+
+        - ``1`` (0x0001) ``grip``         : 현재 target force/width로 동작 시작.
+                                            width는 fingertip offset 미포함으로 계산.
+                                            busy=1이면 명령 무시됨.
+        - ``8`` (0x0008) ``stop``         : 현재 동작 중지.
+        - ``16`` (0x0010) ``grip_w_offset``: grip과 동일하나 width 계산에
+                                            fingertip offset 반영.
         """
         result = self.client.write_register(
             address=2, value=command, unit=65)
 
     def set_target_force(self, force_val):
-        """Writes the target force to be reached
-        when gripping and holding a workpiece.
-        It must be provided in 1/10th Newtons.
-        The valid range is 0 to 400 for the RG2 and 0 to 1200 for the RG6.
+        """그리퍼가 물체를 잡을 때 도달/유지할 target force를 설정한다.
+
+        단위: 1/10 N. 유효 범위: RG2는 0~400, RG6는 0~1200.
         """
         result = self.client.write_register(
             address=0, value=force_val, unit=65)
 
     def set_target_width(self, width_val):
-        """Writes the target width between
-        the finger to be moved to and maintained.
-        It must be provided in 1/10th millimeters.
-        The valid range is 0 to 1100 for the RG2 and 0 to 1600 for the RG6.
-        Please note that the target width should be provided
-        corrected for any fingertip offset,
-        as it is measured between the insides of the aluminum fingers.
+        """그리퍼 손가락이 이동/유지할 target width를 설정한다.
+
+        단위: 1/10 mm. 유효 범위: RG2는 0~1100, RG6는 0~1600.
+        주의: 측정값은 알루미늄 손가락 내측 거리이므로,
+        fingertip offset이 적용된 값을 직접 넘겨야 한다.
         """
         result = self.client.write_register(
             address=1, value=width_val, unit=65)

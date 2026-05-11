@@ -1,21 +1,21 @@
-"""MainController node — chess workflow orchestrator (entry point: ``ros2 run chess_ai main``).
+"""MainController 노드 — 체스 워크플로 오케스트레이터 (entry point: ``ros2 run chess_ai main``).
 
-Role:
-    Coordinates the end-to-end chess turn:
-    sample board state → user verification (Web UI via rosbridge) → Stockfish best move → robot action.
+역할:
+    한 턴의 체스 흐름 전체를 조율한다:
+    보드 상태 샘플링 → 사용자 검증 (rosbridge 경유 Web UI) → Stockfish best move → 로봇 액션.
     State machine: ``IDLE`` → ``SAMPLING`` → ``WAIT_DECISION`` → ``RUNNING`` → ``IDLE``
-    (transitions guarded by ``self._state_lock``).
+    (전이는 ``self._state_lock``으로 보호).
 
 ROS2 Interfaces:
-    Service: ``~/start_sampling`` (std_srvs/Trigger) — state-change trigger; IDLE→SAMPLING.
-             Resolves to /main_controller/start_sampling.
+    Service: ``~/start_sampling`` (std_srvs/Trigger) — 상태 전이 트리거; IDLE→SAMPLING.
+             ``/main_controller/start_sampling``으로 풀림.
     Service: ``~/user_decision`` (chess_ai_interfaces/srv/UserDecision) — Phase 5 sub-phase D2.
-             Replaces Firebase ui_control polling. Validates state==WAIT_DECISION and
-             matching job_id, then APPROVED → RUNNING, RECHECKED → stay+update final_board,
-             GAME_OVER → IDLE. Resolves to /main_controller/user_decision.
+             Firebase ui_control polling 대체. state==WAIT_DECISION + job_id 일치 검증 후
+             APPROVED → RUNNING, RECHECKED → 유지+final_board 갱신, GAME_OVER → IDLE.
+             ``/main_controller/user_decision``으로 풀림.
     Subscriber: Topic ``vision/board_state`` (chess_ai_interfaces/msg/BoardState) —
-                RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). Cached latest is used as the
-                board snapshot for SAMPLING and as the live fallback in RUNNING.
+                RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). 캐시된 최신값을
+                SAMPLING 시 보드 스냅샷, RUNNING 시 live fallback으로 사용.
     Publisher:  Topic ``ui_status`` (chess_ai_interfaces/msg/UIStatus) —
                 RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). main → UI 상태 토픽
                 (Phase 5 sub-phase D1). FSM 전이 + verification/working/ai_suggested_move
@@ -24,13 +24,13 @@ ROS2 Interfaces:
     Client: Action  ``move_chess_piece``  (chess_ai_interfaces/MoveChessPiece)
 
 Threads:
-    - Daemon thread ``_job_make_and_publish_board`` — receives the latched ``vision/board_state``
-      message (TRANSIENT_LOCAL) within ``VISION_RECEIVE_TIMEOUT_SEC``, no resampling/voting
-      (single source of truth from vision node), spawned in ``_on_start_sampling``.
+    - Daemon thread ``_job_make_and_publish_board`` — ``VISION_RECEIVE_TIMEOUT_SEC`` 내에
+      latched ``vision/board_state`` (TRANSIENT_LOCAL)을 수신. 재샘플링/투표 없음
+      (vision 노드가 single source of truth). ``_on_start_sampling``에서 spawn.
     - Daemon thread ``_job_stockfish_then_robot_then_wakeup`` — service call + action goal,
-      spawned in ``_on_user_decision`` (APPROVED branch).
+      ``_on_user_decision``의 APPROVED 분기에서 spawn.
 
-External Dependencies:
+외부 의존성:
     - chess_ai_interfaces — ``StockfishMove.srv``, ``UserDecision.srv``,
       ``MoveChessPiece.action``, ``BoardState.msg``, ``UIStatus.msg``, ``GameEvent.msg``.
     - Firebase 의존 0 (sub-phase E 2026-05-10). audit log는 game_logger 노드의
@@ -81,8 +81,8 @@ from chess_ai_interfaces.action import MoveChessPiece
 #   chess/ui_control — E에서 read/write 모두 제거.
 # audit log는 game_logger 노드 + SQLite (Hard Rule #6) 영속화.
 
-# Phase 5 sub-phase B: vision→main bus is now ROS2 topic (TRANSIENT_LOCAL).
-# Relative topic name (Rule 5); resolves under main_controller's namespace.
+# Phase 5 sub-phase B: vision→main 버스는 이제 ROS2 토픽(TRANSIENT_LOCAL).
+# Relative topic 이름 (Rule 5); main_controller namespace 하위로 풀림.
 VISION_BOARD_STATE_TOPIC = "vision/board_state"
 VISION_RECEIVE_TIMEOUT_SEC = 3.0
 
@@ -103,9 +103,9 @@ _STATE_NAME_TO_UINT = {
     "RUNNING": UIStatus.STATE_RUNNING,
 }
 
-# Cross-node client paths (absolute) — owner는 stockfish.py의 chess_ai_node 노드.
-# stockfish.py가 사설 네임스페이스 `~/StockfishMove`로 등록 → 절대 경로
-# `/chess_ai_node/StockfishMove`. 같은 패턴 reset_chess_state. (PB-4 fix.)
+# Cross-node client 경로 (절대 경로) — owner는 stockfish.py의 chess_ai_node 노드.
+# stockfish.py가 사설 네임스페이스 ``~/StockfishMove``로 등록 → 절대 경로
+# ``/chess_ai_node/StockfishMove``. ``reset_chess_state``도 같은 패턴. (PB-4 fix.)
 STOCKFISH_SERVICE_NAME = "/chess_ai_node/StockfishMove"
 SERVICE_TIMEOUT_SEC = 20.0
 RESET_CHESS_STATE_SERVICE_NAME = "/chess_ai_node/reset_chess_state"
@@ -127,29 +127,29 @@ def now_iso_ms() -> str:
 
 
 class MainController(Node):
-    """Workflow orchestrator node.
+    """워크플로 오케스트레이터 노드.
 
     State machine:
         IDLE → SAMPLING → WAIT_DECISION → RUNNING → IDLE.
 
     Triggers:
         - Service ``~/start_sampling`` (Trigger): IDLE → SAMPLING.
-          Returns success=False with message="busy: state=<state>" if not IDLE.
+          IDLE이 아니면 success=False + message="busy: state=<state>"로 거부.
         - ``~/user_decision`` Service ``DECISION_APPROVED``: WAIT_DECISION → RUNNING.
-        - ``~/user_decision`` Service ``DECISION_RECHECKED``: stays in WAIT_DECISION,
-          updates ``final_board`` from ``corrected_board`` (Service Request 안에 BoardState).
+        - ``~/user_decision`` Service ``DECISION_RECHECKED``: WAIT_DECISION 유지,
+          ``corrected_board``로 ``final_board`` 갱신 (Service Request 안의 BoardState).
         - ``~/user_decision`` Service ``DECISION_GAME_OVER``: → IDLE + KIND_GAME_END 이벤트.
 
-    Concurrency:
-        ``self._state_lock`` (mutex) guards ``self._state`` and ``self._job_id``.
-        Two daemon worker threads (one per phase) run alongside the rclpy executor.
+    동시성:
+        ``self._state_lock`` (mutex) 가 ``self._state``와 ``self._job_id``를 보호.
+        rclpy executor 옆에서 단계별 2개의 daemon worker thread가 동작.
     """
 
     def __init__(self):
         super().__init__("main_controller")
 
         # Vision board_state subscriber (Phase 5 sub-phase B): TRANSIENT_LOCAL latched
-        # so a late-joining subscriber receives the publisher's most recent message.
+        # 이므로 늦게 가입한 subscriber도 publisher의 최신 메시지를 즉시 받는다.
         self._latest_board_state: dict | None = None
         self._latest_board_state_lock = threading.Lock()
         self._board_state_received_event = threading.Event()
@@ -255,8 +255,8 @@ class MainController(Node):
         )
 
     def _on_board_state(self, msg: BoardState) -> None:
-        # Subscriber callback runs on the rclpy executor thread; worker threads consume
-        # the cached value via _wait_for_board_state.
+        # Subscriber callback은 rclpy executor 스레드에서 실행; worker thread는
+        # 캐시된 값을 ``_wait_for_board_state``로 소비한다.
         if len(msg.squares) != len(msg.pieces):
             self.get_logger().warn(
                 f"BoardState arrays length mismatch: squares={len(msg.squares)} pieces={len(msg.pieces)} — discarding."
@@ -268,17 +268,16 @@ class MainController(Node):
         self._board_state_received_event.set()
 
     def _wait_for_board_state(self, timeout_sec: float) -> dict:
-        """Block until at least one ``BoardState`` message has been received.
+        """``BoardState`` 메시지가 최소 1회 수신될 때까지 블로킹.
 
-        With ``TRANSIENT_LOCAL`` durability the publisher's most recent message is
-        delivered to a late-joining subscriber, so the typical wait is sub-second.
-        Subsequent calls return immediately (Event remains set) with whatever the
-        most recent received message was — vision continues updating
-        ``_latest_board_state`` as new frames arrive.
+        ``TRANSIENT_LOCAL`` durability 덕분에 publisher의 최신 메시지가 늦게 가입한
+        subscriber에 전달되므로 일반적으로 sub-second 대기로 끝난다.
+        이후 호출은 즉시 반환되며 (Event는 set 유지) 가장 최근 수신된 메시지를 받는다 —
+        vision은 새 프레임이 들어올 때마다 ``_latest_board_state``를 계속 갱신한다.
 
         Raises:
-            TimeoutError: no message received within ``timeout_sec`` (vision
-                node not running or topic unbound).
+            TimeoutError: ``timeout_sec`` 내에 메시지 미수신 (vision 노드가 실행
+                중이지 않거나 토픽이 bind되지 않음).
         """
         if not self._board_state_received_event.wait(timeout=timeout_sec):
             raise TimeoutError(
@@ -290,7 +289,7 @@ class MainController(Node):
             return dict(self._latest_board_state)
 
     def _publish_ui_status(self) -> None:
-        """Snapshot tracking fields under ``_state_lock`` and publish UIStatus.
+        """``_state_lock`` 보호 하에 tracking 필드를 스냅샷한 뒤 UIStatus를 발행.
 
         모든 FSM 전이 / verification·working·ai_suggested_move·final_board 업데이트
         직후 호출. 락은 read 동안만 잡고 publish() 자체는 락 밖에서 실행 — rclpy
@@ -400,19 +399,18 @@ class MainController(Node):
         return response
 
     def _job_make_and_publish_board(self, job_id: str):
-        """Worker thread (daemon) — capture board state and publish for user verification.
+        """Worker thread (daemon) — 보드 상태를 캡처해 사용자 검증을 위해 발행한다.
 
         Args:
-            job_id: str — timestamp-based identifier set when SAMPLING was entered.
+            job_id: str — SAMPLING 진입 시점에 설정된 timestamp 기반 식별자.
 
         Side Effects:
-            - Receives the latched ``vision/board_state`` message (TRANSIENT_LOCAL) within
-              ``VISION_RECEIVE_TIMEOUT_SEC``. Single source of truth from vision node —
-              vision is responsible for any internal smoothing / sample voting.
-            - On success: transitions ``self._state`` to ``WAIT_DECISION``, publishes
-              ``UIStatus`` (verification=True, final_board) + ``GameEvent``
-              (KIND_USER_BOARD_CONFIRMED).
-            - On exception (incl. ``TimeoutError`` if vision is silent): transitions back to ``IDLE``.
+            - ``VISION_RECEIVE_TIMEOUT_SEC`` 내에 latched ``vision/board_state``
+              (TRANSIENT_LOCAL) 메시지를 수신. vision 노드가 single source of truth —
+              내부 smoothing / sample voting은 vision의 책임.
+            - 성공 시: ``self._state``를 ``WAIT_DECISION``으로 전이, ``UIStatus``
+              (verification=True, final_board) + ``GameEvent`` (KIND_USER_BOARD_CONFIRMED) 발행.
+            - 예외 시 (vision 침묵으로 인한 ``TimeoutError`` 포함): ``IDLE``로 복귀.
         """
         try:
             self.get_logger().info(
@@ -449,13 +447,13 @@ class MainController(Node):
     def _on_user_decision(
         self, request: UserDecision.Request, response: UserDecision.Response
     ) -> UserDecision.Response:
-        """Service handler for ``~/user_decision`` (Phase 5 sub-phase D2).
+        """``~/user_decision`` Service handler (Phase 5 sub-phase D2).
 
-        Replaces ``_poll_ui_decision`` Firebase polling. Handler runs in the rclpy
-        executor thread (default MutuallyExclusiveCallbackGroup, same as
-        ``_on_start_sampling`` — FSM transitions are serialized).
+        ``_poll_ui_decision`` Firebase polling을 대체. handler는 rclpy executor 스레드에서
+        실행 (default MutuallyExclusiveCallbackGroup, ``_on_start_sampling``과 동일 그룹
+        — FSM 전이가 직렬화).
 
-        Validation order:
+        검증 순서:
             1. ``self._state == "WAIT_DECISION"`` — 다른 상태면 거부.
             2. ``self._job_id == request.job_id`` — stale 결정 거부.
             3. ``request.decision in {APPROVED, RECHECKED, GAME_OVER}`` — unknown 거부.
@@ -561,21 +559,21 @@ class MainController(Node):
         return response
 
     def _job_stockfish_then_robot_then_wakeup(self, job_id: str):
-        """Worker thread (daemon) — call Stockfish and send robot action.
+        """Worker thread (daemon) — Stockfish 호출 후 로봇 액션을 전송한다.
 
         Args:
-            job_id: str — timestamp-based identifier set when WAIT_DECISION was entered.
+            job_id: str — WAIT_DECISION 진입 시점에 설정된 timestamp 기반 식별자.
 
         Side Effects:
             - 보드 source: ``self._final_board`` (UserDecision으로 갱신된 최신값).
               비어 있으면 live ROS2 ``vision/board_state`` fallback (TimeoutError 가능).
-            - Calls service ``StockfishMove`` (board만 전달) — engine config는 stockfish
+            - ``StockfishMove`` Service 호출 (board만 전달) — engine config는 stockfish
               노드 parameter 단일 경로. 응답에 best_move + fen 포함.
             - 빈 ``best_move`` → 게임 종료 (KIND_GAME_END "checkmate") + game_id 리셋.
             - 정상 ``best_move`` → robot action 실행 + KIND_AI_MOVE 이벤트 발행.
-            - Sends an action goal to ``move_chess_piece`` and waits up to
-              ``ROBOT_ACTION_RESULT_TIMEOUT_SEC`` (=180 s) for the result.
-            - In the ``finally`` block: transitions ``self._state`` to ``IDLE``.
+            - ``move_chess_piece``에 action goal을 보내고 결과를 최대
+              ``ROBOT_ACTION_RESULT_TIMEOUT_SEC`` (=180 s) 대기.
+            - ``finally`` 블록: ``self._state``를 ``IDLE``로 복귀.
         """
         try:
             with self._state_lock:
@@ -640,9 +638,9 @@ class MainController(Node):
             self._publish_ui_status()
 
     def _call_stockfish(self, board_dict: dict) -> tuple[str, str]:
-        """Call StockfishMove service.
+        """``StockfishMove`` Service를 호출.
 
-        Returns: (best_move, fen). best_move=="" → game over / failure.
+        Returns: (best_move, fen). best_move=="" → game over 또는 실패.
         fen은 sub-phase E에서 추가 — game_logger audit에 사용.
         """
         # sub-phase D3: 엔진 설정값(depth/skill_level/turn)은 stockfish 노드 parameter로

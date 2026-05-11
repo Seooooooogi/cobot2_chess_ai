@@ -1,6 +1,6 @@
-"""GameLoggerNode — append-only SQLite logger (entry point: ``ros2 run chess_ai gamelogger``).
+"""GameLoggerNode — append-only SQLite 로거 노드 (entry point: ``ros2 run chess_ai gamelogger``).
 
-Role:
+역할:
     Phase 5 sub-phase E. Firebase가 담당하던 audit trail (Hard Rule #6: append-only
     game/event logs)을 LAN-local SQLite DB로 이전. main_controller의 GameEvent
     토픽 + UIStatus 토픽 + vision board_state 토픽을 구독해서 영속화.
@@ -25,7 +25,7 @@ Schema:
     moves          (id PK, game_id FK, ply, uci, side, fen, ts_ros) — INSERT-only.
     events         (id PK, ts_ros, ts_wall, game_id, kind, payload_json) — INSERT-only.
 
-Failure mode:
+실패 모드:
     - DB open / DDL 실패 → ``RuntimeError`` (Rule 7 fail-loud, launch respawn).
     - 런타임 INSERT 실패 → ``ERROR`` 로그 + 카운터 증가, 게임은 계속 (audit gap만 발생).
 """
@@ -58,7 +58,7 @@ DEFAULT_DB_PATH = os.path.expanduser(
 
 
 # ============================================================================
-# SQLite schema — append-only enforced via TRIGGER. Hard Rule #6.
+# SQLite 스키마 — append-only를 TRIGGER로 강제 (Hard Rule #6 스키마 레벨 보장).
 # ============================================================================
 DDL_SCRIPT = """
 PRAGMA journal_mode = WAL;
@@ -133,7 +133,7 @@ def _now_iso_ms() -> str:
 
 
 class GameLoggerNode(Node):
-    """ROS2 node hosting the append-only SQLite audit log."""
+    """append-only SQLite audit log을 호스팅하는 ROS2 노드."""
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         super().__init__("game_logger")

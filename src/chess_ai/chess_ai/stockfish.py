@@ -1,33 +1,33 @@
-"""AIMoveServiceNode — Stockfish engine wrapper service (entry point: ``ros2 run chess_ai stockfish``).
+"""AIMoveServiceNode — Stockfish 엔진 래퍼 서비스 노드 (entry point: ``ros2 run chess_ai stockfish``).
 
-Role:
-    Exposes a ROS2 service that takes a chess board dict (``A1``..``H8`` → piece codes ``WP``/``BR``/...),
-    converts it to FEN, and returns Stockfish's best move.
+역할:
+    체스 보드 dict (``A1``..``H8`` → 기물 코드 ``WP``/``BR``/...)를 입력받아
+    FEN 문자열로 변환 후 Stockfish 엔진의 best move를 반환하는 ROS2 service를 노출한다.
 
 ROS2 Interfaces:
     Server: Service ``StockfishMove`` (chess_ai_interfaces/StockfishMove)
     Server: Service ``reset_chess_state`` (std_srvs/Trigger)
     ROS2 parameters (Phase 5 sub-phase D3, Web UI가 rosbridge set_parameters로 설정):
-        - ``depth`` (int, 1–30, default 15)            — Stockfish search depth.
-        - ``skill_level`` (int, 0–20, default 10)      — Stockfish skill level.
+        - ``depth`` (int, 1–30, default 15)            — Stockfish 탐색 깊이.
+        - ``skill_level`` (int, 0–20, default 10)      — Stockfish 기력(skill level).
         - ``default_turn`` (string, "w" or "b", default "w") — AI가 두는 색상.
         Range validation은 ``add_on_set_parameters_callback``에서 수행. 위반 시 set 실패.
         엔진은 항상 이 parameter 값을 사용 — StockfishMove.srv는 보드 데이터만 전달.
 
-Internal State:
-    - ``self.stockfish``  — ``Stockfish(path=STOCKFISH_PATH)`` instance, or ``None`` if engine binary missing.
-    - ``self.dict_memory`` — last board dict used to infer ``last_move`` for en-passant heuristics.
+내부 상태:
+    - ``self.stockfish``  — ``Stockfish(path=STOCKFISH_PATH)`` 인스턴스. 엔진 바이너리 부재 시 ``None``.
+    - ``self.dict_memory`` — 직전 보드 dict. 앙파상(en-passant) 추론용 ``last_move`` 계산에 사용.
 
-External Dependencies:
-    - Stockfish binary at ``$STOCKFISH_PATH`` (env var, default ``/usr/games/stockfish``)
-    - ``stockfish`` PyPI library
+외부 의존성:
+    - Stockfish 바이너리 (``$STOCKFISH_PATH``, env var, default ``/usr/games/stockfish``)
+    - ``stockfish`` PyPI 라이브러리
     - ``chess_ai_interfaces.srv.StockfishMove``
 
 Issues (Phase 1-1 doc Node 2):
     - ~~IMPORTANT S1-1: ``STOCKFISH_PATH`` is a module constant — Phase 4: env-ize.~~ **RESOLVED 2026-05-04**: ``os.getenv("STOCKFISH_PATH", ...)``.
     - ~~MINOR S1-2: Service QoS not explicitly declared (defaults used) → ROS2 Rule 4.~~ **RESOLVED 2026-05-04**: ``qos_profile=qos_profile_services_default`` 명시.
-    # S1-3 RESOLVED 2026-05-05: castling rights now tracked via ``self.castling_rights`` (persisted to JSON); revoked on king/rook moves.
-    # S1-4 RESOLVED 2026-05-05: ``dict_memory`` persisted to ``CHESS_AI_STATE_PATH`` JSON; loaded on node startup.
+    # S1-3 RESOLVED 2026-05-05: castling rights를 ``self.castling_rights``로 추적 (JSON 영속화); 킹/룩 이동 시 revoke.
+    # S1-4 RESOLVED 2026-05-05: ``dict_memory``를 ``CHESS_AI_STATE_PATH`` JSON에 영속화; 노드 기동 시 로드.
 """
 
 import json
@@ -70,13 +70,13 @@ VALID_TURNS = ("w", "b")
 
 
 class AIMoveServiceNode(Node):
-    """ROS2 node hosting the ``StockfishMove`` and ``reset_chess_state`` services.
+    """``StockfishMove``와 ``reset_chess_state`` service를 호스팅하는 ROS2 노드.
 
-    Side Effects on construction:
-        - Attempts to instantiate ``Stockfish(path=STOCKFISH_PATH)``; on failure stores ``None``
-          and logs an error. Each request re-checks for ``None``.
-        - Calls ``_load_state()`` to restore ``dict_memory`` and ``castling_rights`` from JSON
-          (``CHESS_AI_STATE_PATH``). Defaults to empty dict / ``"KQkq"`` if file absent.
+    생성자 Side Effects:
+        - ``Stockfish(path=STOCKFISH_PATH)`` 인스턴스화를 시도하며, 실패 시 ``None``으로
+          저장하고 error 로그를 남긴다. 각 요청은 매번 ``None`` 여부를 재확인한다.
+        - ``_load_state()``로 ``dict_memory``와 ``castling_rights``를 JSON
+          (``CHESS_AI_STATE_PATH``)에서 복원. 파일이 없으면 빈 dict / ``"KQkq"``로 시작.
     """
 
     def __init__(self):
@@ -135,22 +135,22 @@ class AIMoveServiceNode(Node):
         return SetParametersResult(successful=True)
 
     def dict_to_fen(self, pieces_dict, turn):
-        """Convert a board dict to a FEN string.
+        """보드 dict을 FEN 문자열로 변환한다.
 
         Args:
-            pieces_dict: dict[str, str] — keys ``"A1"``..``"H8"``, values ``"WP"``/``"BR"``/etc.
-            turn:        ``"w"`` or ``"b"``.
+            pieces_dict: dict[str, str] — key는 ``"A1"``..``"H8"``, value는 ``"WP"``/``"BR"`` 등.
+            turn:        ``"w"`` 또는 ``"b"``.
 
         Returns:
-            str — FEN with the form ``"<placement> <turn> <castling> <ep> 0 1"``.
+            str — ``"<placement> <turn> <castling> <ep> 0 1"`` 형식의 FEN.
 
         Side Effects:
-            None (reads ``self.dict_memory`` but does not modify it here).
+            없음 (``self.dict_memory`` read-only로만 참조).
 
         Notes:
-            Castling rights: uses ``self.castling_rights`` (persisted, revoked on king/rook moves).
-            En-passant: inferred from ``self.dict_memory``-derived ``last_move``
-            (single-removal/single-addition diff) — multi-piece changes yield ``last_move = None``.
+            Castling rights: ``self.castling_rights`` 사용 (JSON 영속화, 킹/룩 이동 시 revoke).
+            En-passant: ``self.dict_memory`` 기반으로 ``last_move``를 추론
+            (single-removal/single-addition diff) — 여러 칸 변경 시 ``last_move = None``.
         """
         last_move = None
         board = [["" for _ in range(8)] for _ in range(8)]
@@ -230,23 +230,22 @@ class AIMoveServiceNode(Node):
         return fen
 
     def get_updated_dict(self, pieces_dict, move):
-        """Apply a chess move to a board dict (used to update ``self.dict_memory``).
+        """체스 수를 보드 dict에 적용한다 (``self.dict_memory`` 갱신에 사용).
 
         Args:
-            pieces_dict: dict[str, str] — current board.
-            move:        UCI-style move string, e.g. ``"e2e4"`` or ``"e7e8q"`` (promotion suffix is ignored
-                         here — only ``move[0:4]`` is consumed).
+            pieces_dict: dict[str, str] — 현재 보드.
+            move:        UCI 형식 수 문자열, 예: ``"e2e4"`` 또는 ``"e7e8q"``
+                         (프로모션 suffix는 무시 — ``move[0:4]``만 소비).
 
         Returns:
-            dict[str, str] — updated board (input dict is copied, not mutated).
+            dict[str, str] — 적용된 보드 (입력 dict은 복사되어 mutate되지 않음).
 
         Side Effects:
-            None.
+            없음.
 
         Notes:
-            Branches: pawn diagonal move into empty square → en-passant capture (removes the captured
-            pawn at ``to_pos[0] + from_pos[1]``); king two-square move → castling (relocates rook
-            from ``A``/``H`` to ``D``/``F``).
+            분기 처리: 폰의 대각선 빈 칸 이동 → 앙파상 캡처 (잡힌 폰 ``to_pos[0] + from_pos[1]``에서 제거);
+            킹의 2칸 이동 → 캐슬링 (룩을 ``A``/``H`` → ``D``/``F``로 재배치).
         """
         from_pos = move[0:2].upper()
         to_pos = move[2:4].upper()
@@ -278,7 +277,7 @@ class AIMoveServiceNode(Node):
         return updated_dict
 
     def get_best_move_callback(self, request, response):
-        saved_rights = self.castling_rights  # snapshot for rollback on exception
+        saved_rights = self.castling_rights  # 예외 발생 시 롤백용 스냅샷
         saved_memory = self.dict_memory
         try:
             if self.stockfish is None:
@@ -305,7 +304,7 @@ class AIMoveServiceNode(Node):
                     if pieces_dict.get("A8") == "BR": inferred += "q"  # 흑 퀸사이드
                 self.castling_rights = inferred
 
-            # Update castling rights for the human's move (prev board → current board)
+            # 사용자 수 적용에 따른 castling rights revoke (직전 보드 → 현재 보드)
             self._revoke_castling_rights(self.dict_memory, pieces_dict)
 
             self.stockfish.set_skill_level(skill_level)
@@ -326,10 +325,10 @@ class AIMoveServiceNode(Node):
 
             if best_move:
                 updated_dict = self.get_updated_dict(pieces_dict, best_move)
-                # Update castling rights for the AI's move (current board → post-AI board)
+                # AI 수 적용에 따른 castling rights revoke (현재 보드 → AI 수 적용 후 보드)
                 self._revoke_castling_rights(pieces_dict, updated_dict)
                 self.dict_memory = updated_dict
-                self._save_state()  # persist only on complete success
+                self._save_state()  # 완전 성공 시에만 영속화
                 # AI 수 직후의 보드를 다음 차례 색상으로 FEN 직렬화 — game_logger
                 # audit (sub-phase E)에 활용. 차례 flip: 'w' ↔ 'b'.
                 next_turn = "b" if turn == "w" else "w"
@@ -340,7 +339,7 @@ class AIMoveServiceNode(Node):
             response.success = False
             response.best_move = ""
             response.fen = ""
-            self.castling_rights = saved_rights  # rollback to pre-call state
+            self.castling_rights = saved_rights  # 호출 이전 상태로 롤백
             self.dict_memory = saved_memory
 
         return response
