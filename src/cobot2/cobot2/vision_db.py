@@ -171,14 +171,20 @@ def analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, prepro
         crop to RGB and run ResNet to pick a piece type, then write ``"{W|B}{P|R|N|B|Q|K}"``
         into the corresponding cell. YOLO is invoked with ``conf=0.5, iou=0.3``.
     """
+    # YOLO 추론: confidence 0.5 이상, IoU 0.3 이하(중복 박스 억제)
     results = yolo_model(frame, conf=0.5, iou=0.3, verbose=False)
     board_dict = {}
 
     for result in results:
         for box in result.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+            # 체스 말의 발 지점(foot point): 바운딩 박스 하단 중앙.
+            # 말의 머리가 아닌 발로 어느 칸에 있는지 판별해야 격자 매핑 오차가 줄어든다.
             foot_point = ((x1 + x2) // 2, y2)
 
+            # 발 지점이 어느 체스판 격자 폴리곤 안에 있는지 순차 탐색.
+            # pointPolygonTest >= 0 : 경계 포함 내부. 격자를 찾지 못하면 skip.
             square = None
             if grid_polygons:
                 for sq, poly in grid_polygons.items():
@@ -187,22 +193,26 @@ def analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, prepro
                         break
 
             if not square:
-                continue
+                continue  # 보드 밖 검출 무시
 
+            # HSV V채널 임계값으로 흰/검 구분
             color = get_piece_color_improved(frame, [x1, y1, x2, y2])
 
+            # ResNet 입력용 크롭 (바운딩 박스 전체, BGR → RGB)
             crop_bgr = frame[y1:y2, x1:x2]
             if crop_bgr.size == 0:
                 continue
 
             crop = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
+            # preprocess: Resize(224,224) → ToTensor → ImageNet Normalize
             input_tensor = preprocess(crop).unsqueeze(0).to(device)
 
             with torch.no_grad():
                 outputs = resnet_model(input_tensor)
                 _, pred_idx = torch.max(outputs, 1)
-                abbr = CLASS_ABBR[CLASS_NAMES[pred_idx.item()]]
+                abbr = CLASS_ABBR[CLASS_NAMES[pred_idx.item()]]  # 'P','R','N','B','Q','K'
 
+            # 최종 코드: "W" + 기물약자 or "B" + 기물약자 (예: "WP", "BK")
             color_prefix = "W" if color == "White" else "B"
             final_code = f"{color_prefix}{abbr}"
             board_dict[square] = final_code
@@ -211,6 +221,11 @@ def analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, prepro
 
 
 def normalize_board_dict(d):
+    """보드 딕셔너리를 정규화한다 — 키/값을 문자열로, 알파벳 순 정렬.
+
+    정규화된 dict 끼리만 == 비교로 '변경 없음' 판단이 가능하다.
+    only_publish_on_change 로직과 ROS2 메시지 직렬화 모두 이 함수를 통과한 dict를 사용.
+    """
     if not d:
         return {}
     return {str(k): str(v) for k, v in sorted(d.items(), key=lambda x: x[0])}
@@ -355,6 +370,8 @@ class VisionNode(Node):
                 2,
             )
 
+            # 속도 제한 (rate-limiting): analyze_interval_sec 마다 1회 추론.
+            # 매 프레임마다 YOLO+ResNet을 돌리면 CPU/GPU 과부하 — 일정 간격으로 throttle.
             if (now_ts - last_analyze_ts) >= self.analyze_interval_sec:
                 last_analyze_ts = now_ts
 
@@ -373,10 +390,14 @@ class VisionNode(Node):
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                     cv2.imwrite(os.path.join(SAVE_DIR, f"frame_{ts}.jpg"), frame)
 
+                # only_publish_on_change: 보드 상태가 이전과 동일하면 발행 생략.
+                # TRANSIENT_LOCAL latched이므로 가입자는 구독 시점에 최신 값을 받음.
                 should_send = True
                 if self.only_publish_on_change and last_sent_board is not None and board_norm == last_sent_board:
                     should_send = False
 
+                # 추가 publish 속도 제한 (publish_min_interval_sec).
+                # analyze_interval과 독립적으로 조절 가능.
                 if should_send and (now_ts - last_publish_ts) >= self.publish_min_interval_sec:
                     self._publish_board_state(board_norm, capture_stamp)
                     last_publish_ts = now_ts

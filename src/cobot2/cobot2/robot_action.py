@@ -474,20 +474,44 @@ class MovingChessPiece:
             time.sleep(0.25)
 
     def calculate(self):
+        """64개 체스 칸 전체에 대한 로봇 TCP 좌표를 미리 계산해 딕셔너리에 저장.
+
+        좌표 체계 (data.json 기반):
+            posx_A1   : A1 칸 위치 [x, y, z, rx, ry, rz] (mm, deg)
+            posnumx_interval : 숫자(1→8) 방향 x 증분 — 각 숫자 행 사이의 거리
+            posnumy_interval : 숫자 방향 y 미세 보정 — 체스판이 완전 수직이 아닌 경우 보정
+            poscharx_interval: 문자(A→H) 방향 x 미세 보정
+            poschary_interval: 문자 방향 y 증분 — 각 문자 열 사이의 거리
+            z_posx_interval  : pick/place 시 접근 높이 오프셋 (over 위치)
+
+        생성하는 세 딕셔너리:
+            posx_board_list : 각 칸의 보드 레벨 좌표 (말이 놓이는 높이)
+            posx_over_list  : 보드 레벨 + z_posx_interval (수직 접근 전 안전 높이)
+            posx_under_list : 보드 레벨 + 3 mm (pick 시 살짝 눌러잡는 낮은 위치)
+
+        # verify needed R1-7: data.json Korean-keyed 좌표 실측 검증 미완료.
+        """
         self.posx_board_list = {}
         self.posx_over_list = {}
         self.posx_under_list = {}
         characters = ('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H')
-        for c in range(8):
-            for j in range(8):
+        for c in range(8):   # 열 (A~H): c=0은 A, c=7은 H
+            for j in range(8):  # 행 (1~8): j=0은 1, j=7은 8
+                # 보드 레벨 좌표: A1 기준으로 열/행 증분을 더한다.
+                # x 방향: 숫자(행) 증분 + 문자(열) x 미세 보정
+                # y 방향: 문자(열) y 증분 + 미세 보정
+                # z 및 rx,ry,rz: A1과 동일 (보드 평면 가정)
                 posx_a = [self.posx_A1[0]+self.posnumx_interval*j+self.posnumy_interval*j, self.posx_A1[1]+self.poscharx_interval*c-self.poschary_interval*c, self.posx_A1[2]]
-                posx_a.extend(self.posx_A1[3:6])
+                posx_a.extend(self.posx_A1[3:6])  # rx, ry, rz 복사
                 self.posx_board_list[f"{characters[c]}{j+1}"] = posx_a
 
+                # over: 수직 접근 전 안전 높이 (z만 증가)
                 posx_over = posx_a.copy()
                 posx_over[2] += self.z_posx_interval
                 self.posx_over_list[f"{characters[c]}{j+1}"] = posx_over
 
+                # under: 살짝 눌러잡는 낮은 위치 (z + 3 mm)
+                # # verify needed: 3 mm 고정값의 적정성 (기물 높이에 따라 달라질 수 있음)
                 posx_under = posx_a.copy()
                 posx_under[2] += 3
                 self.posx_under_list[f"{characters[c]}{j+1}"] = posx_under
@@ -521,23 +545,29 @@ class MovingChessPiece:
         """
         command = goal_handle.request.command
         pieces_dict = json.loads(goal_handle.request.pieces_dict)
-        from_pos = command[0:2].upper()
-        to_pos = command[2:4].upper()
+        from_pos = command[0:2].upper()  # 예: "E2"
+        to_pos = command[2:4].upper()    # 예: "E4"
 
-        piece_from = pieces_dict.get(from_pos)
-        target = pieces_dict.get(to_pos)
+        piece_from = pieces_dict.get(from_pos)  # 이동할 기물 코드 (예: "WP")
+        target = pieces_dict.get(to_pos)         # 목적지 기물 코드 (있으면 잡기)
         self.log(f"Moving piece: {piece_from} from {from_pos} to {to_pos}, target: {target}")
 
         self.log("Moving piece starts")
+        # DSR_ROBOT2 모션 함수: function-level import (global import 시 g_node 초기화 필요)
         from DSR_ROBOT2 import movej, movel, mwait, wait
 
+        # 홈 위치로 이동 + 그리퍼 열기 (이전 동작 상태 초기화)
         movej(self.basic_posj, vel=self.vel, acc=self.acc)
         mwait(self.mwait_time)
         self.release()
 
+        # ── 분기 1: 앙파상 (en-passant) ──────────────────────────────
+        # 폰이 대각선으로 이동하는데 목적지가 비어있으면 앙파상.
+        # 잡히는 폰의 위치: to_pos의 열 + from_pos의 행 (예: E5 → E5에 없고 E4에 있던 폰)
         if piece_from[1] == "P":
             if from_pos[0] != to_pos[0] and target is None:
-                en_passant = ''.join([to_pos[0], from_pos[1]])
+                en_passant = ''.join([to_pos[0], from_pos[1]])  # 잡히는 폰의 칸
+                # 잡히는 폰 lift → tomb
                 movel(self.posx_over_list[en_passant], time=self.time)
                 mwait(self.mwait_time)
                 movel(self.posx_board_list[en_passant], time=self.time)
@@ -556,15 +586,21 @@ class MovingChessPiece:
                 mwait(self.mwait_time)
                 movej(self.basic_posj, vel=self.vel, acc=self.acc)
                 mwait(self.mwait_time)
-        
+                # 앙파상: 잡힌 기물 처리만 하고 폰 자체 이동은 아래 공통 섹션에서.
+                # (early return 없이 fall-through → 공통 pick&place 섹션 실행)
+
+        # ── 분기 2: 캐슬링 ────────────────────────────────────────────
+        # 킹이 2칸 이동하면 캐슬링 — 대응하는 룩을 먼저 옮긴다.
+        # 킹사이드(G 파일): 룩 H→F. 퀸사이드(C 파일): 룩 A→D.
         elif piece_from[1] == "K":
             if abs(ord(from_pos[0])-ord(to_pos[0])) == 2:
                 if to_pos[0] == "G":
-                    castling_from = "H" + from_pos[1]
+                    castling_from = "H" + from_pos[1]  # 킹사이드 룩
                     castling_to = "F" + from_pos[1]
                 else:
-                    castling_from = "A" + from_pos[1]
+                    castling_from = "A" + from_pos[1]  # 퀸사이드 룩
                     castling_to = "D" + from_pos[1]
+                # 룩 이동 시퀀스: over → board(grip) → over → target_over → target_under(release)
                 movel(self.posx_over_list[castling_from], time=self.time)
                 mwait(self.mwait_time)
                 movel(self.posx_board_list[castling_from], time=self.time)
@@ -579,7 +615,10 @@ class MovingChessPiece:
                 self.release()
                 movel(self.posx_over_list[castling_to], time=self.time)
                 mwait(self.mwait_time)
+                # 룩 처리 완료 → 공통 섹션에서 킹 이동
 
+        # ── 공통: 잡기(capture) 전처리 ───────────────────────────────
+        # 목적지에 기물이 있으면 먼저 tomb(무덤)으로 옮긴다.
         if target is not None:
             movel(self.posx_over_list[to_pos], time=self.time)
             mwait(self.mwait_time)
@@ -599,7 +638,9 @@ class MovingChessPiece:
             mwait(self.mwait_time)
             movej(self.basic_posj, vel=self.vel, acc=self.acc)
             mwait(self.mwait_time)
-        
+
+        # ── 공통: 실제 기물 이동 pick & place ─────────────────────────
+        # from_pos 에서 pick → to_pos 에 place (under 위치로 내려 release)
         movel(self.posx_over_list[from_pos], time=self.time)
         mwait(self.mwait_time)
         movel(self.posx_board_list[from_pos], time=self.time)
@@ -609,7 +650,7 @@ class MovingChessPiece:
         mwait(self.mwait_time)
         movel(self.posx_over_list[to_pos], time=self.time)
         mwait(self.mwait_time)
-        movel(self.posx_under_list[to_pos], time=self.time)
+        movel(self.posx_under_list[to_pos], time=self.time)  # 살짝 눌러놓기
         wait(self.wait_time)
         self.release()
         movel(self.posx_over_list[to_pos], time=self.time)

@@ -188,11 +188,14 @@ class AIMoveServiceNode(Node):
             if len(removed) == 1 and len(added) == 1:
                 last_move = removed[0] + added[0]
 
+        # board[row][col]: row=0이 8랭크(흑 뒤쪽), row=7이 1랭크(백 뒤쪽)
+        # "A1" → col=0, row=7 / "H8" → col=7, row=0
         for position, piece in pieces_dict.items():
-            col = ord(position[0].upper()) - ord("A")
-            row = 8 - int(position[1])
+            col = ord(position[0].upper()) - ord("A")  # 'A'=0 ~ 'H'=7
+            row = 8 - int(position[1])                  # '1'→7, '8'→0
             board[row][col] = piece_match.get(piece, "")
 
+        # FEN 랭크 직렬화: 빈 칸은 연속 빈 칸 수를 숫자로 압축 (예: "rnbqkbnr/pppppppp/8/...")
         fen_rows = []
         for row in board:
             empty_count = 0
@@ -202,24 +205,27 @@ class AIMoveServiceNode(Node):
                     empty_count += 1
                 else:
                     if empty_count > 0:
-                        row_str += str(empty_count)
+                        row_str += str(empty_count)  # 이전 빈 칸 수 flush
                         empty_count = 0
                     row_str += cell
             if empty_count > 0:
-                row_str += str(empty_count)
+                row_str += str(empty_count)  # 행 끝 빈 칸 flush
             fen_rows.append(row_str)
 
-        # castling rights — persisted by _load_state/_save_state; always a non-None string
+        # 캐슬링 권한 — _load_state/_save_state 로 영속화; "KQkq" → "KQ" → "-" 형태로 축소
         rights = self.castling_rights or "-"
 
-        # en-passant (간단 추론)
+        # 앙파상 타겟 칸 추론: 폰이 2칸 전진했으면 그 사이 칸을 ep_square로 지정
+        # (Stockfish이 앙파상 가능 여부 판단에 사용)
         ep_square = "-"
         if last_move is not None and pieces_dict.get(last_move[2:4].upper()) in ["WP", "BP"]:
-            if last_move[1] == "2" and last_move[3] == "4":
+            if last_move[1] == "2" and last_move[3] == "4":  # 백 폰 2칸 전진
                 ep_square = last_move[0] + "3"
-            elif last_move[1] == "7" and last_move[3] == "5":
+            elif last_move[1] == "7" and last_move[3] == "5":  # 흑 폰 2칸 전진
                 ep_square = last_move[0] + "6"
 
+        # FEN 최종 조합: "<랭크> <차례> <캐슬링> <앙파상> <반수> <수 번호>"
+        # 반수(halfmove clock)와 수 번호는 단순화를 위해 "0 1" 고정.
         fen = f"{'/'.join(fen_rows)} {turn} {rights} {ep_square} 0 1"
         return fen
 
@@ -286,17 +292,17 @@ class AIMoveServiceNode(Node):
             depth = int(self.get_parameter("depth").value)
             turn = str(self.get_parameter("default_turn").value)
 
-            # On first call (empty history): clamp persisted "KQkq" to what the
-            # current position can actually support (prevents invalid FEN when
-            # pieces for a right are absent, e.g. rook already captured/moved).
+            # 첫 호출(dict_memory 비어있을 때): 보존된 "KQkq"를 현재 보드로 클램프.
+            # 룩/킹이 이미 없거나 움직인 상태라면 해당 캐슬링 권한을 제거해 유효한 FEN 보장.
+            # (체스판 재배치 후 상태 복원 시나리오 대응 — PB-4 이후 설계)
             if not self.dict_memory:
                 inferred = ""
                 if pieces_dict.get("E1") == "WK":
-                    if pieces_dict.get("H1") == "WR": inferred += "K"
-                    if pieces_dict.get("A1") == "WR": inferred += "Q"
+                    if pieces_dict.get("H1") == "WR": inferred += "K"  # 백 킹사이드
+                    if pieces_dict.get("A1") == "WR": inferred += "Q"  # 백 퀸사이드
                 if pieces_dict.get("E8") == "BK":
-                    if pieces_dict.get("H8") == "BR": inferred += "k"
-                    if pieces_dict.get("A8") == "BR": inferred += "q"
+                    if pieces_dict.get("H8") == "BR": inferred += "k"  # 흑 킹사이드
+                    if pieces_dict.get("A8") == "BR": inferred += "q"  # 흑 퀸사이드
                 self.castling_rights = inferred
 
             # Update castling rights for the human's move (prev board → current board)
