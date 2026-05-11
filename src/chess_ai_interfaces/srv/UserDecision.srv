@@ -18,7 +18,7 @@ uint8 DECISION_GAME_OVER = 2      # 게임 종료 선언 — IDLE 복귀
 
 uint8 decision
 string job_id
-cobot2_interfaces/BoardState corrected_board
+chess_ai_interfaces/BoardState corrected_board
 ---
 bool accepted
 string message

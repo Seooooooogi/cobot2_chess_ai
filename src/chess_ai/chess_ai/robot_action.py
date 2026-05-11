@@ -1,4 +1,4 @@
-"""RobotActionServer — Doosan M0609 + RG2 motion action server (entry point: ``ros2 run cobot2 robotaction``).
+"""RobotActionServer — Doosan M0609 + RG2 motion action server (entry point: ``ros2 run chess_ai robotaction``).
 
 Role:
     Receives ``MoveChessPiece`` action goals containing a chess move (e.g. ``"e2e4"``) plus the current
@@ -6,7 +6,7 @@ Role:
     en-passant and castling).
 
 ROS2 Interfaces:
-    Server: Action ``move_chess_piece`` (cobot2_interfaces/MoveChessPiece) (line 402-414)
+    Server: Action ``move_chess_piece`` (chess_ai_interfaces/MoveChessPiece) (line 402-414)
 
     Auxiliary node ``dsr_robot_node`` (namespace=``dsr01``) is constructed at line 552 to host the global
     references DR_init reads from. **It is not added to the executor** (line 563 only spins
@@ -29,10 +29,10 @@ Mode Selection:
 
 External Dependencies:
     - DR_init / DSR_ROBOT2 (vendored doosan-robot2)
-    - ``cobot2.onrobot.RG`` wrapping pymodbus
+    - ``chess_ai.onrobot.RG`` wrapping pymodbus
     - ``data.json`` (alongside this file) for motion parameters and chess-board coordinates
       (``JSON_PATH`` line 71, loaded by ``MovingChessPiece.load_initial_config``)
-    - ``cobot2_interfaces.action.MoveChessPiece``
+    - ``chess_ai_interfaces.action.MoveChessPiece``
 
 Issues (Phase 1-1 doc Node 3):
     - RESOLVED R1-1: module-level ``gripper = RG(...)`` removed (2026-05-01) — moved into
@@ -72,7 +72,7 @@ import threading
 
 from datetime import datetime
 
-from cobot2_interfaces.action import MoveChessPiece # 커스텀 액션 임포트
+from chess_ai_interfaces.action import MoveChessPiece # 커스텀 액션 임포트
 
 
 class FailsafeError(RuntimeError):

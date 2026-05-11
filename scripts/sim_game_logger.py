@@ -2,7 +2,7 @@
 """Standalone integration simulation for the game_logger SQLite audit pipeline.
 
 Phase 5 sub-phase E verification harness. Runs without any hardware, vision,
-camera, Firebase, or rosbridge dependency — only ROS2 + cobot2 + cobot2_interfaces
+camera, Firebase, or rosbridge dependency — only ROS2 + chess_ai + chess_ai_interfaces
 need to be sourced. Useful for:
 
   - Confirming GameEvent / UIStatus / BoardState pub-sub round-trip works.
@@ -51,8 +51,8 @@ from rclpy.qos import (
 )
 from std_msgs.msg import Header
 
-from cobot2_interfaces.msg import BoardState, GameEvent, UIStatus
-from cobot2.game_logger import GameLoggerNode
+from chess_ai_interfaces.msg import BoardState, GameEvent, UIStatus
+from chess_ai.game_logger import GameLoggerNode
 
 
 # ----------------------------------------------------------------------------

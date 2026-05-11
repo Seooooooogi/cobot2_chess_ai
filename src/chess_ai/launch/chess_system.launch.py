@@ -8,7 +8,7 @@ import os
 
 def generate_launch_description():
     """
-    COBOT2 Chess System - 전체 시스템 Launch 파일
+    Chess AI System - 전체 시스템 Launch 파일
 
     실행되는 노드:
     1. Stockfish AI 노드 (ROS2 parameter로 depth/skill_level/default_turn 관리)
@@ -19,7 +19,7 @@ def generate_launch_description():
     6. rosbridge websocket — Web UI ↔ ROS2 (Phase 5 sub-phase C)
 
     사용 예시:
-    ros2 launch cobot2 chess_system.launch.py
+    ros2 launch chess_ai chess_system.launch.py
     """
 
     # 노드명은 각 노드의 ``super().__init__(...)`` 코드 값을 single source of truth로
@@ -35,7 +35,7 @@ def generate_launch_description():
     return LaunchDescription([
         # 1. Stockfish AI Node → /chess_ai_node
         Node(
-            package='cobot2',
+            package='chess_ai',
             executable='stockfish',
             output='screen',
             respawn=True,
@@ -44,7 +44,7 @@ def generate_launch_description():
         # 2. CV Chess Recognition Node → /vision_db
         #    publisher: /vision/board_state (절대 경로 — namespace-relative).
         Node(
-            package='cobot2',
+            package='chess_ai',
             executable='object',
             output='screen',
             respawn=True,
@@ -53,7 +53,7 @@ def generate_launch_description():
         # 3. Robot Control Action Server → /robot_action_server
         #    ActionServer: /move_chess_piece (절대 경로). reset Service: /robot_action_server/reset.
         Node(
-            package='cobot2',
+            package='chess_ai',
             executable='robotaction',
             output='screen',
             respawn=True,
@@ -63,7 +63,7 @@ def generate_launch_description():
         #    Publishers: ~/ui_status, ~/game_event (사설 네임스페이스).
         #    Services:   ~/start_sampling, ~/user_decision.
         Node(
-            package='cobot2',
+            package='chess_ai',
             executable='main',
             output='screen',
             respawn=True,
@@ -75,7 +75,7 @@ def generate_launch_description():
         # respawn=True — DB write 실패 시 노드는 ERROR 로그만 남기고 계속 동작하지만
         # startup 실패 (권한 등) 시 launch가 자동 재시작.
         Node(
-            package='cobot2',
+            package='chess_ai',
             executable='gamelogger',
             output='screen',
             respawn=True,

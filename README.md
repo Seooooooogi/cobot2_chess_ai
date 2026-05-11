@@ -30,12 +30,12 @@ ROS2 + 두산 M0609 협동로봇 기반 AI 체스 시스템. 비전(YOLO + ResNe
 
 ### 1.2 시크릿 / `.env`
 
-`setup.py`가 `share/cobot2/.env`를 데이터 파일로 등록 → **`.env`가 없으면 빌드 실패**한다.
+`setup.py`가 `share/chess_ai/.env`를 데이터 파일로 등록 → **`.env`가 없으면 빌드 실패**한다.
 
 ```bash
 cd /home/rokey/cobot2_chess_ai
-cp .env.example src/cobot2/.env
-# 그런 다음 src/cobot2/.env 안의 값들을 채운다 (ROBOT_MODE, 모델 경로 등)
+cp .env.example src/chess_ai/.env
+# 그런 다음 src/chess_ai/.env 안의 값들을 채운다 (ROBOT_MODE, 모델 경로 등)
 ```
 
 `.env` 는 절대 커밋하지 않는다 (CLAUDE.md Hard Rule 5).
@@ -48,11 +48,11 @@ cd /home/rokey/cobot2_chess_ai
 # (a) 신규 환경 — vendored 패키지까지 포함한 클린 빌드
 rm -rf build install log
 colcon build \
-  --packages-up-to dsr_bringup2 dsr_controller2 onrobot_rg_control m0609_rg2_bringup cobot2 \
+  --packages-up-to dsr_bringup2 dsr_controller2 onrobot_rg_control m0609_rg2_bringup chess_ai \
   --symlink-install
 
-# (b) cobot2 코드만 수정한 경우
-colcon build --packages-select cobot2 --symlink-install
+# (b) chess_ai 코드만 수정한 경우
+colcon build --packages-select chess_ai --symlink-install
 ```
 
 ### 1.4 Shebang 패치 (재빌드마다 필요)
@@ -62,7 +62,7 @@ colcon build --packages-select cobot2 --symlink-install
 ```bash
 for ep in main stockfish robotaction object gamelogger; do
   sed -i "1s|^#!.*|#!/home/rokey/cobot2_chess_ai/.venv/bin/python|" \
-    install/cobot2/lib/cobot2/$ep
+    install/chess_ai/lib/chess_ai/$ep
 done
 ```
 
@@ -77,7 +77,7 @@ done
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/rokey/cobot2_chess_ai/install/setup.bash      # vendored DSR/onrobot 포함
-source /home/rokey/cobot2_chess_ai/.venv/bin/activate      # cobot2 패키지 실행 시
+source /home/rokey/cobot2_chess_ai/.venv/bin/activate      # chess_ai 패키지 실행 시
 ```
 
 ### 2.2 Bringup (별도 셸)
@@ -92,15 +92,15 @@ ros2 launch m0609_rg2_bringup bringup.launch.py mode:=virtual
 ros2 launch m0609_rg2_bringup bringup.launch.py mode:=real host:=192.168.1.100
 ```
 
-### 2.3 cobot2 노드
+### 2.3 chess_ai 노드
 
 각 노드 별도 셸:
 ```bash
-ros2 run cobot2 stockfish     # Stockfish 서비스 (cobot2/stockfish.py)
-ros2 run cobot2 robotaction   # Doosan M0609 + RG2 액션 서버 (cobot2/robot_action.py)
-ros2 run cobot2 object        # 비전 인식 + /vision/board_state publish (cobot2/vision_db.py)
-ros2 run cobot2 gamelogger    # SQLite 감사 로그 (cobot2/game_logger.py) — 선택
-ros2 run cobot2 main          # 워크플로 오케스트레이터 (cobot2/main.py)
+ros2 run chess_ai stockfish     # Stockfish 서비스 (chess_ai/stockfish.py)
+ros2 run chess_ai robotaction   # Doosan M0609 + RG2 액션 서버 (chess_ai/robot_action.py)
+ros2 run chess_ai object        # 비전 인식 + /vision/board_state publish (chess_ai/vision_db.py)
+ros2 run chess_ai gamelogger    # SQLite 감사 로그 (chess_ai/game_logger.py) — 선택
+ros2 run chess_ai main          # 워크플로 오케스트레이터 (chess_ai/main.py)
 ```
 
 ### 게임 시작 트리거
@@ -160,7 +160,7 @@ ros2 service call /main_controller/start_sampling std_srvs/srv/Trigger {}
 ### Phase 4 deferred (Open Decisions / Remaining Issues)
 
 - `data.json:칸_간격` (50.2) **dead key** — 삭제 vs 매핑 복원 결정.
-- `chess_grid.json` byte-identical 사본 2개 (`cobot2/`, `config/`) — 단일화.
+- `chess_grid.json` byte-identical 사본 2개 (`chess_ai/`, `config/`) — 단일화.
 - `launch/cv_chess_recognition.launch.py` **dead launch** — `executable=cv_chess_recognition_node`가 setup.py entry_points 미등록.
 - 모델 파일 (`best.pt` 19MB, `classifier.pt` 43MB, `hello_rokey_8332_32.tflite` 203KB) `setup.py:data_files` 미패키징.
 - ~~음성/OpenAI 코드 처리~~ — 2026-05-04 옵션 A(파일 삭제) 완료. voice stack 제거, ~/start_sampling Service로 전환.
@@ -170,7 +170,7 @@ ros2 service call /main_controller/start_sampling std_srvs/srv/Trigger {}
   - `goal_callback` 무조건 ACCEPT (Rule 7)
   - `feedback_msg` 미사용 (Rule 2 — Action 재설계 후보)
 - shebang 영속 해결 — wrapper / setup.py / cmake flag 미결정.
-- `package.xml` rosdep key 오류 — `cobot2`의 `ament_python`, `onrobot_rg_control`의 `message_runtime` (vendored, Rule 6에 따라 수정 금지).
+- `package.xml` rosdep key 오류 — `chess_ai`의 `ament_python`, `onrobot_rg_control`의 `message_runtime` (vendored, Rule 6에 따라 수정 금지).
 - vendored 패키지의 `ros2 topic hz /dsr01/joint_states` hang on TRANSIENT_LOCAL pub.
 
 ### 보안 (carry over)

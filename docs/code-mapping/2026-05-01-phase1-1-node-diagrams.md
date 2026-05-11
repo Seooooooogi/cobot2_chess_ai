@@ -8,10 +8,10 @@
 
 | Entry point | File | LoC | Node 여부 |
 |-------------|------|-----|-----------|
-| `ros2 run cobot2 main` | `src/cobot2/cobot2/main.py` | 493 | Yes — `MainController(Node)` |
-| `ros2 run cobot2 stockfish` | `src/cobot2/cobot2/stockfish.py` | 201 | Yes — `AIMoveServiceNode(Node)` |
-| `ros2 run cobot2 robotaction` | `src/cobot2/cobot2/robot_action.py` | 283 | Yes — `RobotActionServer(Node)` |
-| `ros2 run cobot2 object` | `src/cobot2/cobot2/vision_db.py` | 217 | **No** — script-style, ROS2 미사용 |
+| `ros2 run chess_ai main` | `src/chess_ai/chess_ai/main.py` | 493 | Yes — `MainController(Node)` |
+| `ros2 run chess_ai stockfish` | `src/chess_ai/chess_ai/stockfish.py` | 201 | Yes — `AIMoveServiceNode(Node)` |
+| `ros2 run chess_ai robotaction` | `src/chess_ai/chess_ai/robot_action.py` | 283 | Yes — `RobotActionServer(Node)` |
+| `ros2 run chess_ai object` | `src/chess_ai/chess_ai/vision_db.py` | 217 | **No** — script-style, ROS2 미사용 |
 
 `vision_db.py`는 ROS2 노드가 아니라 Firebase 직결 클라이언트. ROS2 메시지 버스에 참여하지 않음 (verify by grep: `from rclpy` 부재).
 
@@ -65,7 +65,7 @@
 ## Node 1 — `MainController` (main.py)
 
 ### Identity
-- **File**: `src/cobot2/cobot2/main.py:182`
+- **File**: `src/chess_ai/chess_ai/main.py:182`
 - **Node name**: `main_controller`
 - **Role**: 워크플로 오케스트레이터 (sample → verify → stockfish → robot → wakeup)
 
@@ -74,8 +74,8 @@
 | Direction | Type | Name | Msg/Srv/Action | QoS | 위치 |
 |-----------|------|------|----------------|-----|------|
 | Server | Service | `~/start_sampling` → `/main_controller/start_sampling` | `std_srvs/Trigger` | `rmw_qos_profile_services_default` | `_on_start_sampling` |
-| Client | Service | `StockfishMove` | `cobot2_interfaces/StockfishMove` | default | |
-| Client | Action | `move_chess_piece` | `cobot2_interfaces/MoveChessPiece` | default | |
+| Client | Service | `StockfishMove` | `chess_ai_interfaces/StockfishMove` | default | |
+| Client | Action | `move_chess_piece` | `chess_ai_interfaces/MoveChessPiece` | default | |
 
 ### Timer
 - `_poll_ui_decision` — 0.2s 주기, Firebase ui_control 폴링 (line 200)
@@ -94,7 +94,7 @@
   - 읽기: `chess/board_state`, `chess/ui_control`, `chess/chess_system`
   - 쓰기: `chess/board_state`, `chess/ui_control`
   - **하드코딩 (Phase 1+ 처리)**: `FIREBASE_SERVICE_ACCOUNT_JSON = "/home/kyb/..."` (line 20), `FIREBASE_DB_URL = "https://chess-43355-..."` (line 21)
-- `cobot2_interfaces`: `StockfishMove.srv`, `MoveChessPiece.action`
+- `chess_ai_interfaces`: `StockfishMove.srv`, `MoveChessPiece.action`
 
 ### Issues / Concerns
 
@@ -113,7 +113,7 @@
 ## Node 2 — `AIMoveServiceNode` (stockfish.py)
 
 ### Identity
-- **File**: `src/cobot2/cobot2/stockfish.py:21`
+- **File**: `src/chess_ai/chess_ai/stockfish.py:21`
 - **Node name**: `chess_ai_node`
 - **Role**: Stockfish 엔진 wrapper service server
 
@@ -121,7 +121,7 @@
 
 | Direction | Type | Name | Msg/Srv | QoS | 위치 |
 |-----------|------|------|---------|-----|------|
-| Server | Service | `StockfishMove` | `cobot2_interfaces/StockfishMove` | default | line 33 |
+| Server | Service | `StockfishMove` | `chess_ai_interfaces/StockfishMove` | default | line 33 |
 
 ### Internal State
 - `self.stockfish` — `Stockfish(path="/usr/games/stockfish")` 인스턴스 (line 26). 실패 시 `None`, 매 요청마다 None 체크 (line 152)
@@ -129,7 +129,7 @@
 
 ### External Dependencies
 - **Stockfish 바이너리**: `/usr/games/stockfish` (line 12). **하드코딩 module 상수** — Phase 1+ env 화 후보.
-- 라이브러리: `stockfish` (PyPI), `cobot2_interfaces.srv.StockfishMove`
+- 라이브러리: `stockfish` (PyPI), `chess_ai_interfaces.srv.StockfishMove`
 
 ### Logic Notes
 - `dict_to_fen()` (line 36-118): board_dict → FEN 변환. **castling rights / en-passant 추론은 휴리스틱** (line 95-107, 109-115).
@@ -149,7 +149,7 @@
 ## Node 3 — `RobotActionServer` (robot_action.py)
 
 ### Identity
-- **File**: `src/cobot2/cobot2/robot_action.py:214`
+- **File**: `src/chess_ai/chess_ai/robot_action.py:214`
 - **Node name**: `robot_action_server` (네임스페이스 없음 — `RobotActionServer.__init__` line 216에서 `super().__init__('robot_action_server')`만)
 - **보조 노드**: `dsr_robot_node` (namespace=`dsr01`, line 265) — DR_init 글로벌 변수 주입 전용. **`executor.add_node` 호출 없음** → 실제 spin 안 함. `# verify needed`: DR_init이 spin 없는 노드만으로 작동하는지.
 - **Role**: 두산 M0609 + RG2 그리퍼 동작 액션 서버
@@ -158,7 +158,7 @@
 
 | Direction | Type | Name | Action | QoS | 위치 |
 |-----------|------|------|--------|-----|------|
-| Server | Action | `move_chess_piece` | `cobot2_interfaces/MoveChessPiece` | default | line 222-229 |
+| Server | Action | `move_chess_piece` | `chess_ai_interfaces/MoveChessPiece` | default | line 222-229 |
 
 ### Module-level State (BAD — 보고됨)
 ```python
@@ -187,7 +187,7 @@ gripper = RG(GRIPPER_NAME, TOOLCHARGER_IP, TOOLCHARGER_PORT)
 - `MultiThreadedExecutor` (line 272) — 액션 콜백 + 로봇 상태 보고 동시 처리.
 
 ### Configuration
-- `data.json` (`src/cobot2/cobot2/data.json`) — 한국어 키 (`속도`, `가속도`, `시간`, `홈_관절좌표`, `A1_좌표`, `무덤_관절좌표` 등) → Phase 1-4 인벤토리 대상.
+- `data.json` (`src/chess_ai/chess_ai/data.json`) — 한국어 키 (`속도`, `가속도`, `시간`, `홈_관절좌표`, `A1_좌표`, `무덤_관절좌표` 등) → Phase 1-4 인벤토리 대상.
 
 ### Issues / Concerns
 
@@ -207,9 +207,9 @@ gripper = RG(GRIPPER_NAME, TOOLCHARGER_IP, TOOLCHARGER_PORT)
 ## Node 4 — `vision_db.py` (NOT a ROS2 Node)
 
 ### Identity
-- **File**: `src/cobot2/cobot2/vision_db.py`
+- **File**: `src/chess_ai/chess_ai/vision_db.py`
 - **Type**: 스탠드얼론 Python 스크립트. `rclpy` import 없음.
-- **Entry point**: `cobot2/object` (setup.py 매핑)
+- **Entry point**: `chess_ai/object` (setup.py 매핑)
 - **Role**: 카메라 → YOLO + ResNet18 보드 인식 → Firebase 직접 write
 
 ### Pipeline
@@ -236,7 +236,7 @@ Firebase: chess/board_state set({updated_at, piece_count, board})
 |------|------------------|------|
 | YOLO weights | `/home/kyb/cobot_ws/.../best.pt` (line 18) | **부재** (Phase 1+ 처리) |
 | ResNet weights | `/home/kyb/cobot_ws/.../classifier.pt` (line 19) | **부재** (Phase 1+ 처리) |
-| Chess grid | `/home/kyb/cobot_ws/.../config/chess_grid.json` (line 20) | repo에 `src/cobot2/config/chess_grid.json` 존재 — 경로 불일치 |
+| Chess grid | `/home/kyb/cobot_ws/.../config/chess_grid.json` (line 20) | repo에 `src/chess_ai/config/chess_grid.json` 존재 — 경로 불일치 |
 | Firebase service account | env `FIREBASE_SERVICE_ACCOUNT_PATH` | **env 화 완료 (Phase 1 first task)** |
 
 ### Configuration

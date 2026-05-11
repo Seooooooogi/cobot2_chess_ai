@@ -1,11 +1,11 @@
-"""AIMoveServiceNode — Stockfish engine wrapper service (entry point: ``ros2 run cobot2 stockfish``).
+"""AIMoveServiceNode — Stockfish engine wrapper service (entry point: ``ros2 run chess_ai stockfish``).
 
 Role:
     Exposes a ROS2 service that takes a chess board dict (``A1``..``H8`` → piece codes ``WP``/``BR``/...),
     converts it to FEN, and returns Stockfish's best move.
 
 ROS2 Interfaces:
-    Server: Service ``StockfishMove`` (cobot2_interfaces/StockfishMove)
+    Server: Service ``StockfishMove`` (chess_ai_interfaces/StockfishMove)
     Server: Service ``reset_chess_state`` (std_srvs/Trigger)
     ROS2 parameters (Phase 5 sub-phase D3, Web UI가 rosbridge set_parameters로 설정):
         - ``depth`` (int, 1–30, default 15)            — Stockfish search depth.
@@ -21,7 +21,7 @@ Internal State:
 External Dependencies:
     - Stockfish binary at ``$STOCKFISH_PATH`` (env var, default ``/usr/games/stockfish``)
     - ``stockfish`` PyPI library
-    - ``cobot2_interfaces.srv.StockfishMove``
+    - ``chess_ai_interfaces.srv.StockfishMove``
 
 Issues (Phase 1-1 doc Node 2):
     - ~~IMPORTANT S1-1: ``STOCKFISH_PATH`` is a module constant — Phase 4: env-ize.~~ **RESOLVED 2026-05-04**: ``os.getenv("STOCKFISH_PATH", ...)``.
@@ -43,7 +43,7 @@ from stockfish import Stockfish
 
 from std_srvs.srv import Trigger
 
-from cobot2_interfaces.srv import StockfishMove
+from chess_ai_interfaces.srv import StockfishMove
 
 
 # ================= [기본 설정: 클래스보다 먼저 정의] =================

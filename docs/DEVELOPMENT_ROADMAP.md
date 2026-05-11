@@ -24,9 +24,9 @@
 
 ## Phase 0: Environment Bootstrap — ✅ COMPLETE
 
-- [x] 0-1. `.env.example` → `src/cobot2/.env` 복사 + 실제 키 채움.
+- [x] 0-1. `.env.example` → `src/chess_ai/.env` 복사 + 실제 키 채움.
 - [x] 0-2. pip 의존성 설치 (`ultralytics`, `stockfish`, `firebase-admin`).
-- [x] 0-3. `colcon build --packages-select cobot2 cobot2_interfaces` 성공.
+- [x] 0-3. `colcon build --packages-select chess_ai chess_ai_interfaces` 성공.
 - [x] 0-4. 4 entry point 기동 검증.
 
 해결 커밋: `abe8830 chore(phase-0): bootstrap complete + memory updates`.
@@ -121,8 +121,8 @@
 
 ### A+B. vision_db → ROS2 Publisher 노드화 + main.py 수신 경로 전환 — ✅ DONE
 
-- ✅ `src/cobot2/cobot2/vision_db.py` `VisionNode(Node)`로 재작성. `vision/board_state` Publisher (private namespace, Rule 5 상대 경로).
-- ✅ `src/cobot2_interfaces/msg/BoardState.msg` — squares[]/pieces[] 평행 배열 + Header + piece_count.
+- ✅ `src/chess_ai/chess_ai/vision_db.py` `VisionNode(Node)`로 재작성. `vision/board_state` Publisher (private namespace, Rule 5 상대 경로).
+- ✅ `src/chess_ai_interfaces/msg/BoardState.msg` — squares[]/pieces[] 평행 배열 + Header + piece_count.
 - ✅ QoS: RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) (late join 대응).
 - ✅ Frame: `chess_board`.
 - ✅ `main.py`: Firebase polling 제거 → `/vision/board_state` Subscriber. `_sample_and_decide()` 5-frame vote 보존.
@@ -146,7 +146,7 @@
 
 - ✅ `firebase_admin` import / `FirebaseClient` 클래스 / Firebase Web SDK 전체 제거. 커밋 `f0f58f3` (main) + `7460208` (vision_db) + `d4c6c00` (UI).
 - ✅ `.env`에서 `FIREBASE_*` 키 제거 + `.env.example` 갱신 + ADR-002 IMPLEMENTED 상태 기록. 커밋 `e2f2601`.
-- ✅ 신규 `src/cobot2/cobot2/game_logger.py` — ROS2 logger 노드. 커밋 `3720557` (구현) + `365efe0` (launch+setup).
+- ✅ 신규 `src/chess_ai/chess_ai/game_logger.py` — ROS2 logger 노드. 커밋 `3720557` (구현) + `365efe0` (launch+setup).
   - 구독: `/main_controller/game_event` (depth=10, latched) + `/main_controller/ui_status` (depth=1) + `/vision/board_state` (depth=1).
   - 영속: SQLite (`~/.local/share/cobot2_chess_ai/game_log.db`, env: `CHESS_AI_LOG_DB_PATH`).
   - 실제 스키마 (4 테이블):

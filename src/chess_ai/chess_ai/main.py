@@ -1,4 +1,4 @@
-"""MainController node — chess workflow orchestrator (entry point: ``ros2 run cobot2 main``).
+"""MainController node — chess workflow orchestrator (entry point: ``ros2 run chess_ai main``).
 
 Role:
     Coordinates the end-to-end chess turn:
@@ -9,19 +9,19 @@ Role:
 ROS2 Interfaces:
     Service: ``~/start_sampling`` (std_srvs/Trigger) — state-change trigger; IDLE→SAMPLING.
              Resolves to /main_controller/start_sampling.
-    Service: ``~/user_decision`` (cobot2_interfaces/srv/UserDecision) — Phase 5 sub-phase D2.
+    Service: ``~/user_decision`` (chess_ai_interfaces/srv/UserDecision) — Phase 5 sub-phase D2.
              Replaces Firebase ui_control polling. Validates state==WAIT_DECISION and
              matching job_id, then APPROVED → RUNNING, RECHECKED → stay+update final_board,
              GAME_OVER → IDLE. Resolves to /main_controller/user_decision.
-    Subscriber: Topic ``vision/board_state`` (cobot2_interfaces/msg/BoardState) —
+    Subscriber: Topic ``vision/board_state`` (chess_ai_interfaces/msg/BoardState) —
                 RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). Cached latest is used as the
                 board snapshot for SAMPLING and as the live fallback in RUNNING.
-    Publisher:  Topic ``ui_status`` (cobot2_interfaces/msg/UIStatus) —
+    Publisher:  Topic ``ui_status`` (chess_ai_interfaces/msg/UIStatus) —
                 RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1). main → UI 상태 토픽
                 (Phase 5 sub-phase D1). FSM 전이 + verification/working/ai_suggested_move
                 업데이트 시 latched publish.
-    Client: Service ``StockfishMove``      (cobot2_interfaces/StockfishMove)
-    Client: Action  ``move_chess_piece``  (cobot2_interfaces/MoveChessPiece)
+    Client: Service ``StockfishMove``      (chess_ai_interfaces/StockfishMove)
+    Client: Action  ``move_chess_piece``  (chess_ai_interfaces/MoveChessPiece)
 
 Threads:
     - Daemon thread ``_job_make_and_publish_board`` — receives the latched ``vision/board_state``
@@ -31,7 +31,7 @@ Threads:
       spawned in ``_on_user_decision`` (APPROVED branch).
 
 External Dependencies:
-    - cobot2_interfaces — ``StockfishMove.srv``, ``UserDecision.srv``,
+    - chess_ai_interfaces — ``StockfishMove.srv``, ``UserDecision.srv``,
       ``MoveChessPiece.action``, ``BoardState.msg``, ``UIStatus.msg``, ``GameEvent.msg``.
     - Firebase 의존 0 (sub-phase E 2026-05-10). audit log는 game_logger 노드의
       SQLite append-only DB (Hard Rule #6).
@@ -69,9 +69,9 @@ from rclpy.qos import (
 )
 from std_srvs.srv import Trigger
 
-from cobot2_interfaces.msg import BoardState, GameEvent, UIStatus
-from cobot2_interfaces.srv import StockfishMove, UserDecision
-from cobot2_interfaces.action import MoveChessPiece
+from chess_ai_interfaces.msg import BoardState, GameEvent, UIStatus
+from chess_ai_interfaces.srv import StockfishMove, UserDecision
+from chess_ai_interfaces.action import MoveChessPiece
 
 
 # ================= [설정 상수: 클래스 밖] =================

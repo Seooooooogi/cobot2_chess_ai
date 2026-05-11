@@ -1,8 +1,8 @@
-"""Vision pipeline — chess piece recognition + ROS2 publish (entry point: ``ros2 run cobot2 object``).
+"""Vision pipeline — chess piece recognition + ROS2 publish (entry point: ``ros2 run chess_ai object``).
 
 ROS2 node:
     Subclass of ``rclpy.node.Node`` (V1-1 RESOLVED 2026-05-10, Phase 5 sub-phase A).
-    Publishes recognized board state on ``/vision/board_state`` (``cobot2_interfaces/msg/BoardState``)
+    Publishes recognized board state on ``/vision/board_state`` (``chess_ai_interfaces/msg/BoardState``)
     using QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) so late-joining subscribers
     (e.g. ``main`` node, web UI via ``rosbridge_websocket``) receive the most recent value.
     Phase 5 sub-phase E (2026-05-10): Firebase dual-write 제거. ROS2 토픽이 단일
@@ -54,7 +54,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
-from cobot2_interfaces.msg import BoardState
+from chess_ai_interfaces.msg import BoardState
 
 
 # ================= [사용자 설정 구역] =================
@@ -93,7 +93,7 @@ def load_chess_grid(json_path):
 
     Notes:
         # verify needed V1-8: ``GRID_PATH`` is now ``CHESS_GRID_PATH`` env var (Phase 4 env-ize 2026-05-01).
-        ``src/cobot2/config/chess_grid.json`` and ``src/cobot2/cobot2/chess_grid.json`` exist (byte-identical, Phase 1-4) —
+        ``src/chess_ai/config/chess_grid.json`` and ``src/chess_ai/chess_ai/chess_grid.json`` exist (byte-identical, Phase 1-4) —
         whether the env var points to the correct file is unverified.
     """
     if not os.path.exists(json_path):
@@ -310,7 +310,7 @@ class VisionNode(Node):
         if missing:
             raise RuntimeError(
                 f"vision_db missing required env vars: {missing}. "
-                "Source src/cobot2/.env (or set them via launch 'env=' / shell) before launch. "
+                "Source src/chess_ai/.env (or set them via launch 'env=' / shell) before launch. "
                 "See .env.example for keys."
             )
         not_found = [

@@ -41,13 +41,13 @@
 
 | 파일 | 노드명 | 라인 | 책임 |
 |------|--------|------|------|
-| `cobot2/main.py` | `main_controller` | ~730 | FSM 오케스트레이터 — 체스 턴 전체 흐름 |
-| `cobot2/robot_action.py` | `robot_action_server` | ~940 | Doosan M0609 + RG2 pick-and-place |
-| `cobot2/stockfish.py` | `chess_ai_node` | ~420 | Stockfish 엔진 래퍼 서비스 |
-| `cobot2/vision_db.py` | `vision_db` | ~420 | YOLO+ResNet 비전 파이프라인 |
-| `cobot2/game_logger.py` | `game_logger` | ~356 | SQLite 감사 로그 (append-only) |
-| `cobot2/onrobot.py` | (라이브러리) | ~210 | RG2 Modbus TCP 드라이버 |
-| `cobot2_interfaces/` | (메시지 정의) | — | 커스텀 msg/srv/action 정의 5종 |
+| `chess_ai/main.py` | `main_controller` | ~730 | FSM 오케스트레이터 — 체스 턴 전체 흐름 |
+| `chess_ai/robot_action.py` | `robot_action_server` | ~940 | Doosan M0609 + RG2 pick-and-place |
+| `chess_ai/stockfish.py` | `chess_ai_node` | ~420 | Stockfish 엔진 래퍼 서비스 |
+| `chess_ai/vision_db.py` | `vision_db` | ~420 | YOLO+ResNet 비전 파이프라인 |
+| `chess_ai/game_logger.py` | `game_logger` | ~356 | SQLite 감사 로그 (append-only) |
+| `chess_ai/onrobot.py` | (라이브러리) | ~210 | RG2 Modbus TCP 드라이버 |
+| `chess_ai_interfaces/` | (메시지 정의) | — | 커스텀 msg/srv/action 정의 5종 |
 
 ---
 
@@ -360,7 +360,7 @@ events         (id PK, ts_ros, ts_wall, game_id, kind, payload_json) -- INSERT-o
     service-server ~/reset (Trigger)  ← L1 페일세이프 복구
 ```
 
-### 커스텀 메시지/서비스/액션 정의 (cobot2_interfaces)
+### 커스텀 메시지/서비스/액션 정의 (chess_ai_interfaces)
 
 | 파일 | 타입 | 핵심 필드 |
 |------|------|-----------|
@@ -531,17 +531,17 @@ Phase 5 완료로 정리된 dead 항목들 (이미 제거됨):
 source /opt/ros/humble/setup.bash
 source /home/rokey/cobot2_chess_ai/install/setup.bash
 source /home/rokey/cobot2_chess_ai/.venv/bin/activate
-set -a && source src/cobot2/.env && set +a   # vision_db 필수 env 주입
+set -a && source src/chess_ai/.env && set +a   # vision_db 필수 env 주입
 ```
 
 ### 빌드 + shebang 패치
 
 ```bash
 cd /home/rokey/cobot2_chess_ai
-colcon build --packages-select cobot2 --symlink-install
+colcon build --packages-select chess_ai --symlink-install
 for ep in main stockfish robotaction object gamelogger; do
   sed -i "1s|^#!.*|#!/home/rokey/cobot2_chess_ai/.venv/bin/python|" \
-    install/cobot2/lib/cobot2/$ep
+    install/chess_ai/lib/chess_ai/$ep
 done
 ```
 
@@ -549,17 +549,17 @@ done
 
 ```bash
 ros2 launch m0609_rg2_bringup bringup.launch.py mode:=virtual          # arm bringup
-ros2 run cobot2 stockfish                                                # 체스 엔진
-ros2 run cobot2 robotaction                                              # 로봇 동작
-ros2 run cobot2 object                                                   # 비전 인식
-ros2 run cobot2 gamelogger                                               # 감사 로그 (선택)
-ros2 run cobot2 main                                                     # 오케스트레이터
+ros2 run chess_ai stockfish                                                # 체스 엔진
+ros2 run chess_ai robotaction                                              # 로봇 동작
+ros2 run chess_ai object                                                   # 비전 인식
+ros2 run chess_ai gamelogger                                               # 감사 로그 (선택)
+ros2 run chess_ai main                                                     # 오케스트레이터
 ```
 
 또는 launch 파일로 일괄 실행:
 
 ```bash
-ros2 launch cobot2 chess_system.launch.py
+ros2 launch chess_ai chess_system.launch.py
 ```
 
 ---

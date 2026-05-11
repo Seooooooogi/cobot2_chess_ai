@@ -1,7 +1,7 @@
 # Phase 1-3 — External Dependency Map
 
 > 작성일: 2026-05-01 · 작성자: 인계자 (현 작업자)
-> 목적: cobot2 패키지가 ROS2 외부에서 호출하는 의존성을 위치별로 매핑.
+> 목적: chess_ai 패키지가 ROS2 외부에서 호출하는 의존성을 위치별로 매핑.
 > 범위: Firebase, OpenAI, YOLO/ResNet, Stockfish, Modbus(RG2), 카메라, 음성/오디오 — 7종.
 > **원칙**: 코드 직독으로 확인된 호출 위치만 기록. 동작 추정은 `# verify needed`.
 
@@ -36,7 +36,7 @@
 
 ```python
 # main.py:20
-FIREBASE_SERVICE_ACCOUNT_JSON = "/home/kyb/cobot_ws/src/cobot2/config/kybfirebase.json"
+FIREBASE_SERVICE_ACCOUNT_JSON = "/home/kyb/cobot_ws/src/chess_ai/config/kybfirebase.json"
 # vision_db.py: 동일 패턴, 환경변수 처리됨 (이전 세션 commit edd15bc 참조)
 ```
 
@@ -101,17 +101,17 @@ const firebaseConfig = {
 
 ```
 run_voice.sh:
-  1) WS_DIR 탐색 (src/cobot2/setup.py 또는 install/setup.bash 존재)
-  2) venv 활성화: $WS_DIR/src/cobot2/cobot2/venv_voice/bin/activate
-  3) .env 우선순위: $WS_DIR/src/cobot2/.env → $WS_DIR/.env
+  1) WS_DIR 탐색 (src/chess_ai/setup.py 또는 install/setup.bash 존재)
+  2) venv 활성화: $WS_DIR/src/chess_ai/chess_ai/venv_voice/bin/activate
+  3) .env 우선순위: $WS_DIR/src/chess_ai/.env → $WS_DIR/.env
   4) OPENAI_API_KEY 미설정 시 ERROR exit
-  5) ROS env source + python -m cobot2.voice_control_node
+  5) ROS env source + python -chess_ai.voice_control_node
 ```
 
 **Input Policy 정합성**:
 - `.claude/rules/ai-constitution.md` III에 따라 **음성/OpenAI 신규 추가 금지**.
 - 기존 코드 처리 방향 (handoff Open Decisions): 파일 삭제 / `_archive/` / import guard 중 미결정 → **Phase 4 결정**.
-- 본 launch(`bringup.launch.py`) 및 cobot2 entry point 4종에 `voice_control_node`는 포함되지 않음 — `run_voice.sh`로 별도 기동해야만 활성화. 즉 **현 시스템 시작점에선 OpenAI 호출 비활성**.
+- 본 launch(`bringup.launch.py`) 및 chess_ai entry point 4종에 `voice_control_node`는 포함되지 않음 — `run_voice.sh`로 별도 기동해야만 활성화. 즉 **현 시스템 시작점에선 OpenAI 호출 비활성**.
 
 ---
 
@@ -136,8 +136,8 @@ yolo_model = YOLO(YOLO_PATH)
 ### 모델 파일 — **존재 확인** (handoff stale 정정)
 
 ```
-src/cobot2/cobot2/train_pt/best.pt        19 MB  (YOLO)
-src/cobot2/cobot2/train_pt/classifier.pt  43 MB  (ResNet)
+src/chess_ai/chess_ai/train_pt/best.pt        19 MB  (YOLO)
+src/chess_ai/chess_ai/train_pt/classifier.pt  43 MB  (ResNet)
 ```
 
 > Handoff `## Remaining Issues` 의 "### 모델 가중치 부재" 항목은 **stale**. 두 파일 모두 file system에 존재. **Phase 4에서 handoff 갱신.**
@@ -236,7 +236,7 @@ cv2.imshow("Chess Vision Tracker", display_frame)
 - venv: `opencv-python 4.13.0.92` (handoff carry-over).
 
 **bringup_camera.launch.py** (RealSense 변형):
-- 별도 launch 변형. 본 Phase에선 미기동. RealSense는 ROS2 토픽(`/camera/...`)으로 발행하지만 cobot2 코드는 cv2 직접 사용 중 → **개념 충돌**(Rule 7 명시성). Phase 4에서 통합 검토.
+- 별도 launch 변형. 본 Phase에선 미기동. RealSense는 ROS2 토픽(`/camera/...`)으로 발행하지만 chess_ai 코드는 cv2 직접 사용 중 → **개념 충돌**(Rule 7 명시성). Phase 4에서 통합 검토.
 
 ---
 
@@ -284,7 +284,7 @@ DR_init.__dsr__node  = robot_node
 **제공 패키지**: `dsr_bringup2` (vendored, ec92425 commit).
 
 **Phase 1-2 연결**:
-- `cobot2/robot_action.py`는 `/dsr01/dsr_controller2` 의 ROS2 service들을 **직접 호출 안 함** — DR_init Python 래퍼(DRCF 직결) 사용. Phase 1-2 doc의 "streaming command 토픽 publisher 0" 관찰과 일치.
+- `chess_ai/robot_action.py`는 `/dsr01/dsr_controller2` 의 ROS2 service들을 **직접 호출 안 함** — DR_init Python 래퍼(DRCF 직결) 사용. Phase 1-2 doc의 "streaming command 토픽 publisher 0" 관찰과 일치.
 
 **Tier 0 (CLAUDE.md #1) — virtual mode first**:
 - `robot_action.py:32` `ROBOT_MODE = os.getenv("ROBOT_MODE", "virtual")` — 안전 default = virtual. 환경변수 미설정 시 hardware 활성 안 됨. ✓

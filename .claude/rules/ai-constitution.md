@@ -33,7 +33,7 @@
 
 5. **no hardcoded secrets** — Firebase service account JSON, 두산 로봇 IP/credentials는
    환경변수/`.env`로만 로드. 리포 내 `.env`, `*-firebase-adminsdk-*.json` 커밋 금지.
-   *Why*: 자격 증명 유출 방지. `setup.py`가 `share/cobot2/.env`를 데이터 파일로 등록하므로
+   *Why*: 자격 증명 유출 방지. `setup.py`가 `share/chess_ai/.env`를 데이터 파일로 등록하므로
    `.env` 파일 자체는 빌드에 필요하지만 그 내용물은 환경변수에서 주입.
 
 6. **append-only Firebase logs** — 게임 기록·이벤트 로그 덮어쓰기 금지.

@@ -1,4 +1,4 @@
-"""GameLoggerNode — append-only SQLite logger (entry point: ``ros2 run cobot2 gamelogger``).
+"""GameLoggerNode — append-only SQLite logger (entry point: ``ros2 run chess_ai gamelogger``).
 
 Role:
     Phase 5 sub-phase E. Firebase가 담당하던 audit trail (Hard Rule #6: append-only
@@ -7,9 +7,9 @@ Role:
 
 ROS2 Interfaces:
     Subscribers (모두 RELIABLE + TRANSIENT_LOCAL):
-        - ``/main_controller/game_event``  (cobot2_interfaces/msg/GameEvent), depth=10
-        - ``/main_controller/ui_status``   (cobot2_interfaces/msg/UIStatus),  depth=1
-        - ``/vision/board_state``          (cobot2_interfaces/msg/BoardState), depth=1
+        - ``/main_controller/game_event``  (chess_ai_interfaces/msg/GameEvent), depth=10
+        - ``/main_controller/ui_status``   (chess_ai_interfaces/msg/UIStatus),  depth=1
+        - ``/vision/board_state``          (chess_ai_interfaces/msg/BoardState), depth=1
 
 DB:
     Path:
@@ -46,7 +46,7 @@ from rclpy.qos import (
     HistoryPolicy,
 )
 
-from cobot2_interfaces.msg import BoardState, GameEvent, UIStatus
+from chess_ai_interfaces.msg import BoardState, GameEvent, UIStatus
 
 
 DEFAULT_DB_PATH = os.path.expanduser(

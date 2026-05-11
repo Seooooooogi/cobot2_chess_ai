@@ -1,7 +1,7 @@
 # Phase 1-4 — Configuration File Inventory
 
 > 작성일: 2026-05-01 · 작성자: 인계자 (현 작업자)
-> 목적: cobot2 패키지가 참조하는 JSON 설정 파일의 키별 용도·참조 위치 매핑.
+> 목적: chess_ai 패키지가 참조하는 JSON 설정 파일의 키별 용도·참조 위치 매핑.
 > 범위: `data.json`, `chess_grid.json` (2개 사본).
 > **원칙**: 코드 직독으로 확인된 참조만 기록. 키 의미·단위 추정은 `# verify needed`.
 
@@ -9,9 +9,9 @@
 
 | # | 경로 | 크기 | 형식 | 용도 |
 |---|------|------|------|------|
-| 1 | `src/cobot2/cobot2/data.json` | 12 줄 | JSON object (Korean keys) | DSR 모션 파라미터 + 좌표 calibration |
-| 2 | `src/cobot2/cobot2/chess_grid.json` | 1 줄 (minified) | JSON object (cell→polygon) | 카메라 frame chess board cell polygon |
-| 3 | `src/cobot2/config/chess_grid.json` | 1 줄 (minified) | 동일 (#2와 byte-identical, `diff -q` empty) | **중복 파일** |
+| 1 | `src/chess_ai/chess_ai/data.json` | 12 줄 | JSON object (Korean keys) | DSR 모션 파라미터 + 좌표 calibration |
+| 2 | `src/chess_ai/chess_ai/chess_grid.json` | 1 줄 (minified) | JSON object (cell→polygon) | 카메라 frame chess board cell polygon |
+| 3 | `src/chess_ai/config/chess_grid.json` | 1 줄 (minified) | 동일 (#2와 byte-identical, `diff -q` empty) | **중복 파일** |
 
 ---
 
@@ -21,7 +21,7 @@
 
 ```python
 # robot_action.py:23
-JSON_PATH = os.path.join(BASE_DIR, "data.json")     # cobot2/cobot2/data.json
+JSON_PATH = os.path.join(BASE_DIR, "data.json")     # chess_ai/chess_ai/data.json
 
 # robot_action.py:84-105 (MovingChessPiece.load_initial_config)
 if not os.path.exists(JSON_PATH): return
@@ -98,7 +98,7 @@ self.vel = data.get("속도", self.vel)
 
 ```python
 # vision_db.py:20
-GRID_PATH = "/home/kyb/cobot_ws/src/cobot2/config/chess_grid.json"   # 하드코딩 (Rule 8 위반)
+GRID_PATH = "/home/kyb/cobot_ws/src/chess_ai/config/chess_grid.json"   # 하드코딩 (Rule 8 위반)
 
 # vision_db.py:155
 grid_polygons = load_chess_grid(GRID_PATH)
@@ -108,10 +108,10 @@ grid_polygons = load_chess_grid(GRID_PATH)
 
 ### 사본 중복
 
-- `cobot2/cobot2/chess_grid.json` ↔ `cobot2/config/chess_grid.json`: byte-identical (`diff -q` empty).
+- `chess_ai/chess_ai/chess_grid.json` ↔ 'chess_ai/config/chess_grid.json': byte-identical (`diff -q` empty).
 - **추정 의도**:
-  - `config/`: setup.py가 `share/cobot2/config/`로 install (`setup.py:15` `glob('config/*.json')`)
-  - `cobot2/`: import 시 module 경로 fallback 또는 dev 편의 사본
+  - `config/`: setup.py가 `share/chess_ai/config/`로 install (`setup.py:15` `glob('config/*.json')`)
+  - 'chess_ai/': import 시 module 경로 fallback 또는 dev 편의 사본
 - **현재 GRID_PATH는 absolute /home/kyb/...** — 둘 다 안 봄. 절대경로 하드코딩이 우선 (Phase 4 환경변수화 + 사본 단일화).
 
 ---
@@ -124,28 +124,28 @@ data_files=[
     (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     (os.path.join('share', package_name, 'config'), glob('config/*.json')),    # config/chess_grid.json
     (os.path.join('share', package_name, 'models'), glob('models/*')),          # models/hello_rokey_*.tflite
-    (os.path.join('share', package_name), ['.env', 'cobot2/data.json']),         # ↑ .env + data.json (직접)
+    (os.path.join('share', package_name), ['.env', 'chess_ai/data.json']),         # ↑ .env + data.json (직접)
 ]
 ```
 
-### 설치 결과 (`install/cobot2/share/cobot2/`)
+### 설치 결과 (`install/chess_ai/share/chess_ai/`)
 
 | Source | Install dest |
 |--------|--------------|
-| `launch/*.launch.py` | `share/cobot2/launch/` |
-| `config/chess_grid.json` | `share/cobot2/config/chess_grid.json` |
-| `models/hello_rokey_8332_32.tflite` | `share/cobot2/models/` |
-| `.env` | `share/cobot2/.env` (**필수** — 누락 시 빌드 실패, CLAUDE.md Secrets Policy 참조) |
-| `cobot2/data.json` | `share/cobot2/data.json` |
+| `launch/*.launch.py` | `share/chess_ai/launch/` |
+| `config/chess_grid.json` | `share/chess_ai/config/chess_grid.json` |
+| `models/hello_rokey_8332_32.tflite` | `share/chess_ai/models/` |
+| `.env` | `share/chess_ai/.env` (**필수** — 누락 시 빌드 실패, CLAUDE.md Secrets Policy 참조) |
+| `chess_ai/data.json` | `share/chess_ai/data.json` |
 
 ### Tier 0 (.env) 검토
 
-- `setup.py:17`이 `.env`를 data file로 등록 → `.env` 파일 자체는 **빌드 의존성**. 신규 환경에서 `.env.example` → `src/cobot2/.env` 복사 필수.
+- `setup.py:17`이 `.env`를 data file로 등록 → `.env` 파일 자체는 **빌드 의존성**. 신규 환경에서 `.env.example` → `src/chess_ai/.env` 복사 필수.
 - 환경변수 값은 코드에서 `os.getenv(...)`로 로드(예: `ROBOT_MODE`, `FIREBASE_SERVICE_ACCOUNT_PATH`) — 파일 내용은 secret, **커밋 금지** (`.gitignore` 등록됨). (`OPENAI_API_KEY`, `VOICE_INPUT_ENABLED`, `WAKEWORD_MODEL_PATH` 는 2026-05-04 .env.example에서 제거 완료)
 
 ### 미설치 자산
 
-- `cobot2/cobot2/train_pt/best.pt` (19MB), `classifier.pt` (43MB) — `setup.py:data_files`에 등록 **안 됨** → `install/`에 복사 안 됨.
+- `chess_ai/chess_ai/train_pt/best.pt` (19MB), `classifier.pt` (43MB) — `setup.py:data_files`에 등록 **안 됨** → `install/`에 복사 안 됨.
   - 영향: `vision_db.py:18-19` 절대경로(`/home/kyb/...`)로 직접 읽음 → install 위치 무관, **소스 트리 직접 의존**.
   - Phase 4 후보: model files도 `data_files` 추가 + 환경변수화.
 
@@ -163,11 +163,11 @@ default_resnet_path = os.path.join(home_dir, 'classifier.pt')
 default_grid_path   = os.path.join(home_dir, 'chess_grid.json')
 
 # 64-68
-Node(package='cobot2', executable='cv_chess_recognition_node', ...)
+Node(package='chess_ai', executable='cv_chess_recognition_node', ...)
 ```
 
 **문제**:
-1. `executable='cv_chess_recognition_node'` — `setup.py:entry_points` 에 등록 **안 됨**. `ros2 run cobot2 cv_chess_recognition_node` → "executable not found".
+1. `executable='cv_chess_recognition_node'` — `setup.py:entry_points` 에 등록 **안 됨**. `ros2 run chess_ai cv_chess_recognition_node` → "executable not found".
 2. Default 경로 3종(`~/assembly_yolo11/...`, `~/classifier.pt`, `~/chess_grid.json`) 모두 **실제 파일 위치와 불일치** (실파일은 `train_pt/`와 `config/`에 있음).
 
 **결론**: **Dead launch** — 등록되지 않은 노드 + 잘못된 경로. Phase 4에서 (a) 삭제 또는 (b) `executable=object` (=vision_db) + 정확한 default 경로로 재작성.
@@ -179,7 +179,7 @@ Node(package='cobot2', executable='cv_chess_recognition_node', ...)
 ### 키/파일 정리
 
 1. **`data.json:칸_간격`(50.2) Dead key** — 코드 미참조. 삭제 또는 매핑 복원 결정 필요.
-2. **`chess_grid.json` 사본 중복** — `cobot2/`와 `config/` 두 곳. 단일화 (config 측 보존 권장 — setup.py가 install 대상으로 등록).
+2. **`chess_grid.json` 사본 중복** — 'chess_ai/'와 `config/` 두 곳. 단일화 (config 측 보존 권장 — setup.py가 install 대상으로 등록).
 3. **YOLO/ResNet 모델 미패키징** — `train_pt/*.pt`가 `setup.py:data_files`에 없음. install/ 미복사 → src/ 절대경로 의존.
 
 ### 하드코딩 (Phase 1-3과 중복)

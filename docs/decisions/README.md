@@ -41,7 +41,7 @@
 - `baseline before refactor` 규칙으로 모든 리팩토링 전 동작 기록(로그/스모크 시퀀스)
   의무화. 기록 없는 변경은 회귀 검증 불가.
 - `setup.py`가 `.env`를 share 데이터 파일로 등록하여, `.env` 부재 시 colcon build 실패.
-  신규 환경에선 `.env.example` → `src/cobot2/.env` 복사 필수 (ROADMAP Phase 0-1).
+  신규 환경에선 `.env.example` → `src/chess_ai/.env` 복사 필수 (ROADMAP Phase 0-1).
 
 ---
 

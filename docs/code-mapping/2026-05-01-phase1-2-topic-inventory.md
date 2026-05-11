@@ -2,7 +2,7 @@
 
 > 작성일: 2026-05-01 · 작성자: 인계자 (현 작업자)
 > 목적: virtual mode `bringup.launch.py` 기동 상태에서 실측한 ROS2 endpoint 인벤토리.
-> 보완: Phase 1-1 (코드 직독 mapping)은 cobot2 4개 entry point만 다룸. 본 문서는 **DRCF + DSR controller + gripper_virtual** 의 실제 노출 표면.
+> 보완: Phase 1-1 (코드 직독 mapping)은 chess_ai 4개 entry point만 다룸. 본 문서는 **DRCF + DSR controller + gripper_virtual** 의 실제 노출 표면.
 > **원칙**: 캡처 시점의 daemon 응답을 그대로 기록. 미검증 추정은 `# verify needed`.
 
 ## Capture Baseline
@@ -17,7 +17,7 @@ ros2 launch m0609_rg2_bringup bringup.launch.py     # mode=virtual default
 - DRCF 컨테이너: `dsr01_emulator` (`doosanrobot/dsr_emulator:3.0.1`)
 - ros2_control_node 상태: `STATE_STANDBY` 도달, `joint_state_broadcaster` + `dsr_controller2` configured & activated
 - Raw capture artifacts: `/tmp/inventory/` (nodes.txt / topics_typed.txt / services_typed.txt / actions_typed.txt / node_*.txt / qos_profiles.txt)
-- **Out of scope**: `cobot2` package 노드(`main`, `stockfish`, `robotaction`, `object`) — 본 launch는 bringup만 띄우며 cobot2 entry point는 별도 실행 필요. 본 문서는 bringup 노출 표면 + `cobot2_interfaces` 정의 표면을 함께 기록.
+- **Out of scope**: `chess_ai` package 노드(`main`, `stockfish`, `robotaction`, `object`) — 본 launch는 bringup만 띄우며 chess_ai entry point는 별도 실행 필요. 본 문서는 bringup 노출 표면 + `chess_ai_interfaces` 정의 표면을 함께 기록.
 
 ---
 
@@ -57,7 +57,7 @@ DSR controller가 streaming 입력으로 받는 motion 명령:
 | `/dsr01/speedl_rt_stream` | `dsr_msgs2/msg/SpeedlRtStream` | sub:1 / pub:0 | |
 | `/dsr01/torque_rt_stream` | `dsr_msgs2/msg/TorqueRtStream` | sub:1 / pub:0 | RT torque |
 
-> **Rule 9 검토**: 위 streams는 모두 motion 명령(연속 흐름) — Topic 사용은 Rule 2 (지속적 흐름 + 최신값)에 부합. 단, **사용자 측 publisher가 0개** → 본 launch에서 활용 안 됨. cobot2 `robot_action.py`가 DR_init API로 호출하는지 별도 검증 필요. # verify needed
+> **Rule 9 검토**: 위 streams는 모두 motion 명령(연속 흐름) — Topic 사용은 Rule 2 (지속적 흐름 + 최신값)에 부합. 단, **사용자 측 publisher가 0개** → 본 launch에서 활용 안 됨. chess_ai `robot_action.py`가 DR_init API로 호출하는지 별도 검증 필요. # verify needed
 
 ### 상태(state) 토픽 — DSR controller가 발행
 
@@ -104,7 +104,7 @@ DSR controller가 streaming 입력으로 받는 motion 명령:
 
 ★ `move_home`, ★ `move_joint`, ★ `move_jointx`, ★ `move_line`, ★ `move_blending`, ★ `move_circle`, ★ `move_periodic`, ★ `move_spiral`, ★ `move_spline_joint`, ★ `move_spline_task`, ★ `move_pause`, ★ `move_resume`, ★ `move_stop`, ★ `move_wait`, `alter_motion`, `change_operation_speed`, `check_motion`, `disable_alter_motion`, `enable_alter_motion`, `fkin`, `ikin`, `jog`, `jog_multi`, `set_ref_coord`, `set_singular_handling_force`, `set_singularity_handling`, `trans`
 
-> **추정**: `cobot2/robot_action.py`는 DR_init Python 래퍼(DRCF) 직호출이지 ROS2 service 호출이 아닐 가능성 — Phase 1-1 doc 확인 필요. # verify needed
+> **추정**: `chess_ai/robot_action.py`는 DR_init Python 래퍼(DRCF) 직호출이지 ROS2 service 호출이 아닐 가능성 — Phase 1-1 doc 확인 필요. # verify needed
 
 #### Aux Control / Force / Realtime (~50개)
 
@@ -139,13 +139,13 @@ GPIO·디지털 IO·Modbus·PLC 레지스터·TCP/Tool 정의 — 본 launch 미
 | `/dsr01/motion/movej_h2r` | `dsr_msgs2/action/MovejH2r` | `dsr_controller2` | (없음) |
 | `/dsr01/motion/movel_h2r` | `dsr_msgs2/action/MovelH2r` | `dsr_controller2` | (없음) |
 
-> 두 action 모두 본 launch에서 client 0 — `cobot2/robot_action.py`가 사용하는지 미검증. # verify needed
+> 두 action 모두 본 launch에서 client 0 — `chess_ai/robot_action.py`가 사용하는지 미검증. # verify needed
 
 ---
 
-## `cobot2_interfaces` 정의 (코드 표면, 실행 시 노출)
+## `chess_ai_interfaces` 정의 (코드 표면, 실행 시 노출)
 
-위 인벤토리는 bringup만 띄운 상태. cobot2 패키지가 띄우면 추가로 다음이 노출됨:
+위 인벤토리는 bringup만 띄운 상태. chess_ai 패키지가 띄우면 추가로 다음이 노출됨:
 
 | 종류 | 이름 | 정의 | 비고 |
 |------|------|------|------|
@@ -187,11 +187,11 @@ GPIO·디지털 IO·Modbus·PLC 레지스터·TCP/Tool 정의 — 본 launch 미
 
 ## Open Issues (verification gaps)
 
-1. **streaming command 토픽 사용 주체**: `cobot2/robot_action.py`가 `/dsr01/servoj_stream` 등을 발행하는지, 아니면 DR_init Python 래퍼 직호출인지 확인 필요. Phase 1-1 매핑 + grep 권장.
-2. **action client 부재**: `/dsr01/motion/movej_h2r`, `/movel_h2r` 사용 코드 식별 필요 (vendored DSR 예제 또는 cobot2 측인지).
+1. **streaming command 토픽 사용 주체**: `chess_ai/robot_action.py`가 `/dsr01/servoj_stream` 등을 발행하는지, 아니면 DR_init Python 래퍼 직호출인지 확인 필요. Phase 1-1 매핑 + grep 권장.
+2. **action client 부재**: `/dsr01/motion/movej_h2r`, `/movel_h2r` 사용 코드 식별 필요 (vendored DSR 예제 또는 chess_ai 측인지).
 3. **`/dsr01/io/ctrl_box_digital_input_state`** Rule 1 위반(`UInt8MultiArray`) — vendored이므로 본 프로젝트 외 위반. 기록만.
 4. ~~**`/voice_command` 토픽**~~: **RESOLVED 2026-05-04** — Topic 제거. `/main_controller/start_sampling` (std_srvs/Trigger) Service로 교체. voice_control_node 미기동 무한 대기 해소.
-5. **`/dsr01/robot_disconnection`, `/dsr01/error`**: 구독자 0 — 연결 단절 / 에러 이벤트가 무시되고 있음. cobot2 측 구독자 추가 검토 가치 있음 (Rule 7 silent failure 방지).
+5. **`/dsr01/robot_disconnection`, `/dsr01/error`**: 구독자 0 — 연결 단절 / 에러 이벤트가 무시되고 있음. chess_ai 측 구독자 추가 검토 가치 있음 (Rule 7 silent failure 방지).
 
 ---
 

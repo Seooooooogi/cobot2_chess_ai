@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>cobot2</name>
+  <name>chess_ai</name>
   <version>0.0.1</version>
-  <description>COBOT2 Chess Robot Control Package</description>
+  <description>Chess AI Robot Control Package</description>
   <maintainer email="your_email@example.com">Your Name</maintainer>
   <license>Apache-2.0</license>
 
@@ -12,7 +12,7 @@
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
-  <depend>cobot2_interfaces</depend>
+  <depend>chess_ai_interfaces</depend>
 
   <!-- Phase 5 sub-phase C: Web UI ↔ ROS2 bridge -->
   <exec_depend>rosbridge_server</exec_depend>
