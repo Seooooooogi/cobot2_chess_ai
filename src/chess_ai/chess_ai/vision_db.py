@@ -1,41 +1,24 @@
-"""Vision 파이프라인 — 체스 기물 인식 + ROS2 publish (entry point: ``ros2 run chess_ai object``).
+"""체스 보드 비전 인식 노드 (entry point: ``ros2 run chess_ai object``).
 
-ROS2 node:
-    ``rclpy.node.Node`` 서브클래스 (V1-1 RESOLVED 2026-05-10, Phase 5 sub-phase A).
-    인식된 보드 상태를 ``/vision/board_state`` (``chess_ai_interfaces/msg/BoardState``)에
-    QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)로 publish — 늦게 가입한 subscriber
-    (``main`` 노드, ``rosbridge_websocket`` 경유 Web UI 등)도 최신 값을 즉시 수신.
-    Phase 5 sub-phase E (2026-05-10): Firebase dual-write 제거. ROS2 토픽이 단일
-    publish 채널.
+OpenCV로 카메라를 읽어 YOLO + ResNet18 기반 분류를 수행하고, 인식된 보드 상태를
+``vision/board_state`` topic (``chess_ai_interfaces/msg/BoardState``)으로 publish한다.
 
-파이프라인 (``VisionNode.run``):
-    OpenCV ``VideoCapture(SOURCE)``
-      → YOLO inference (박스당 foot-point 추출)
-      → grid polygon hit-test (``load_chess_grid``)
-      → HSV V-channel threshold → 기물 색상 판정
-      → ResNet18 classifier (6 클래스: Pawn/Rook/Knight/Bishop/Queen/King) → ``WP``/``BR``/...
-      → ``board_dict`` → ROS2 ``/vision/board_state`` publish
+Pipeline:
+    VideoCapture → YOLO detection (박스당 foot-point 추출)
+        → grid polygon hit-test (chess_grid.json) → HSV V-channel piece-color 판정
+        → ResNet18 6-class 분류 (Pawn/Rook/Knight/Bishop/Queen/King)
+        → board_dict → BoardState publish.
 
-ROS2 parameters (``VisionNode.__init__``에서 declare):
-    - ``analyze_interval_sec``        (double, default 0.20) — YOLO+ResNet 추론 간 최소 간격(초).
-    - ``publish_min_interval_sec``    (double, default 0.20) — board_state publish 간 최소 간격(초).
-    - ``only_publish_on_change``      (bool, default True)  — 정규화된 보드가 동일하면 publish 생략.
-    - ``frame_id``                    (string, default ``chess_board``) — publish 메시지 Header.frame_id.
-                                       # verify needed: ``chess_board``는 프로젝트 정의 — REP-105 covered 아님.
+Environment variables (필수):
+    YOLO_MODEL_PATH (str): ultralytics YOLO weight 파일 경로.
+    RESNET_MODEL_PATH (str): ResNet18 fine-tune weight 파일 경로.
+    CHESS_GRID_PATH (str): 64-칸 grid polygon JSON 경로.
+    CAMERA_SOURCE (int): ``cv2.VideoCapture`` index/URL. 기본 ``3``.
 
-외부 의존성 (env vars):
-    - YOLO weights:   ``YOLO_PATH``  (``YOLO_MODEL_PATH`` env var, 필수).
-    - ResNet weights: ``RESNET_PATH`` (``RESNET_MODEL_PATH`` env var, 필수).
-    - Grid JSON:      ``GRID_PATH``  (``CHESS_GRID_PATH`` env var, 필수).
-    - Camera:         ``SOURCE`` (``CAMERA_SOURCE`` env var, default ``3``).
-
-Issues (Phase 1-1 doc Node 4):
-    - V1-1 RESOLVED 2026-05-10 (Phase 5 sub-phase A): ``rclpy.node.Node`` 서브클래스화 +
-      ``/vision/board_state`` publish. Firebase dual-write 잔존 → sub-phase E에서 일괄 제거 (2026-05-10).
-    - V1-2 RESOLVED 2026-05-01: model paths env-ized.
-    - V1-4 RESOLVED 2026-05-01: ``CAMERA_SOURCE`` env var 도입.
-    # verify needed V1-7: piece-color HSV V-channel 임계값 (80, 105) — 조명 변동에 대한 robustness 미확인.
-    # verify needed V1-8: ``CHESS_GRID_PATH`` env var가 올바른 ``chess_grid.json``을 가리키는지 확인.
+Note:
+    Publish QoS는 RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)로 latched. 늦게 가입한
+    subscriber (main, rosbridge_websocket 등)도 즉시 최신 보드를 받는다.
+    ResNet 추론 device는 CUDA 가용 시 자동 GPU.
 """
 
 import cv2
@@ -68,32 +51,27 @@ SAVE_DIR = "./captured_boards"
 CLASS_NAMES = ["Pawn", "Rook", "Knight", "Bishop", "Queen", "King"]
 CLASS_ABBR = {"Pawn": "P", "Rook": "R", "Knight": "N", "Bishop": "B", "Queen": "Q", "King": "K"}
 
-# 디버그 저장 (원하면 True)
-SAVE_EACH_ANALYSIS_FRAME = False
+SAVE_EACH_ANALYSIS_FRAME = False  # True로 두면 매 분석 프레임을 jpg로 저장 (디버그용)
 
-# ===== ROS2 토픽 (Rule 5: 노드 코드는 상대 경로만; 절대 경로 매핑은 launch에서) =====
+# 노드 코드에서는 상대 토픽명만 — 절대 경로 매핑·remap은 launch가 담당
 BOARD_STATE_TOPIC = "vision/board_state"
 # ====================================================
 
 
 def now_iso_ms() -> str:
+    """현재 시각을 millisecond 정밀도 ISO-8601 문자열로 반환한다."""
     return datetime.now().isoformat(timespec="milliseconds")
 
 
 def load_chess_grid(json_path):
-    """``chess_grid.json``에서 격자 폴리곤을 로드한다.
+    """64-칸 grid polygon JSON을 ``cv2`` 호환 ndarray dict로 로드한다.
 
     Args:
-        json_path: str — ``{"A1": [[x,y],...], ...}`` 형식의 JSON 파일 경로.
+        json_path (str): ``{"A1": [[x, y], ...], "A2": ...}`` 형식의 JSON 경로.
 
     Returns:
-        dict[str, np.ndarray] — 칸 이름 → ``(-1, 1, 2)`` int32 폴리곤 점 배열
-        (``cv2.pointPolygonTest``가 요구하는 레이아웃). 파일 부재 시 ``None``.
-
-    Notes:
-        # verify needed V1-8: ``GRID_PATH``는 현재 ``CHESS_GRID_PATH`` env var (Phase 4 env-ize 2026-05-01).
-        ``src/chess_ai/config/chess_grid.json``와 ``src/chess_ai/chess_ai/chess_grid.json``이 동시 존재
-        (byte-identical, Phase 1-4) — env var가 올바른 파일을 가리키는지 미검증.
+        dict[str, np.ndarray] | None: square 이름 → ``(-1, 1, 2)`` int32 폴리곤
+            (``cv2.pointPolygonTest`` 요구 레이아웃). 파일이 없으면 ``None``.
     """
     if not os.path.exists(json_path):
         return None
@@ -103,23 +81,22 @@ def load_chess_grid(json_path):
 
 
 def get_piece_color_improved(img, box):
-    """검출된 기물의 색상을 HSV V채널 임계값으로 White / Black / Unknown 분류한다.
+    """Bounding box 내부 HSV V-channel로 White/Black/Unknown을 판정한다.
+
+    바운딩 박스 상단 중앙 띠 (``y ∈ [y1+0.2h, y1+0.4h]``, ``x ∈ [x1+0.42w, x1+0.58w]``)를
+    ROI로 잘라낸 뒤 V-channel을 검사한다. ``V < 80`` 픽셀이 30 %를 넘거나 V의 median이
+    105 미만이면 ``Black``.
 
     Args:
-        img: BGR 프레임 (np.ndarray).
-        box: ``(x1, y1, x2, y2)`` 바운딩 박스 (길이 4 iterable).
+        img (np.ndarray): BGR 프레임.
+        box (Sequence[int]): ``(x1, y1, x2, y2)`` 바운딩 박스.
 
     Returns:
-        ``"White"``, ``"Black"``, 또는 ROI가 비었을 때 ``"Unknown"``.
+        str: ``"White"``, ``"Black"``, 또는 ROI가 비어있을 때 ``"Unknown"``.
 
-    방법:
-        바운딩 박스의 상단 중앙 띠 ``y ∈ [y1+0.2h, y1+0.4h]``, ``x ∈ [x1+0.42w, x1+0.58w]``
-        를 ROI로 잘라 HSV로 변환 후 V채널을 검사한다.
-        V < 80 픽셀 비율이 30%를 넘거나 V 중앙값이 105 미만이면 ``"Black"``.
-
-    Notes:
-        # verify needed V1-7: HSV V채널 임계값(80, 105)과 ROI 비율(0.2, 0.4, 0.42, 0.58)이
-        조명 변동에 대한 robustness 측면에서 검증되지 않음.
+    Note:
+        V-channel 임계값(80/105)과 ROI 비율은 실험적으로 정한 상수다. 조명 변동에 대한
+        robustness는 별도 검증이 필요하다.
     """
     x1, y1, x2, y2 = map(int, box)
     w, h = x2 - x1, y2 - y1
@@ -139,6 +116,14 @@ def get_piece_color_improved(img, box):
 
 
 def load_resnet_model(path):
+    """ResNet18 (6-class final layer) weight를 로드해 eval 상태로 반환한다.
+
+    Args:
+        path (str): state_dict 경로. CPU로 로드한 뒤 device로 이동한다.
+
+    Returns:
+        tuple[torch.nn.Module, torch.device]: ``(model, device)``. CUDA 가용 시 GPU.
+    """
     model = models.resnet18(weights=None)
     model.fc = nn.Linear(model.fc.in_features, len(CLASS_NAMES))
     model.load_state_dict(torch.load(path, map_location="cpu"))
@@ -147,31 +132,30 @@ def load_resnet_model(path):
 
 
 def analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, preprocess):
-    """단일 프레임에 YOLO + grid 매핑 + 색상 판정 + ResNet을 수행해 보드 dict을 반환한다.
+    """단일 프레임에 detection → square 매핑 → color 판정 → classification을 수행한다.
+
+    각 YOLO 박스의 foot point ``((x1+x2)/2, y2)``를 grid polygon과 hit-test 한 뒤,
+    매칭된 square에 ``{색prefix}{기물약자}`` 코드를 기록한다. 박스가 보드 밖이거나
+    crop이 비면 skip 한다.
 
     Args:
-        frame:          BGR 카메라 프레임.
-        yolo_model:     ``YOLO_PATH``에서 로드한 ``ultralytics.YOLO`` 인스턴스.
-        resnet_model:   ResNet18 (6-class final layer: Pawn/Rook/Knight/Bishop/Queen/King).
-        grid_polygons:  ``load_chess_grid``의 결과 또는 ``None`` (격자 없으면 해당 칸 skip).
-        device:         ResNet 추론용 torch device.
-        preprocess:     torchvision transform 파이프라인 (Resize 224 → ToTensor → ImageNet Normalize).
+        frame (np.ndarray): BGR 카메라 프레임.
+        yolo_model (ultralytics.YOLO): detection 모델. ``conf=0.5, iou=0.3``로 호출.
+        resnet_model (torch.nn.Module): 6-class classifier.
+        grid_polygons (dict[str, np.ndarray] | None): ``load_chess_grid`` 결과.
+            ``None``이면 모든 박스가 skip 된다.
+        device (torch.device): ResNet 추론 device.
+        preprocess (torchvision.transforms.Compose):
+            ``Resize(224) → ToTensor → ImageNet Normalize`` 파이프라인.
 
     Returns:
-        dict[str, str] — 칸 이름 (``"A1"``..``"H8"``) → 기물 코드 (``"WP"``/``"BR"``/...) 매핑.
-        검출되지 않은 칸은 dict에서 누락된다.
+        dict[str, str]: square ("A1".."H8") → piece code ("WP"/"BR"/...). 검출되지 않은
+            square는 dict에 포함되지 않는다.
 
-    Side Effects:
-        없음 (프레임에 대한 순수 함수).
-
-    동작:
-        각 YOLO 박스마다 foot point ``((x1+x2)/2, y2)``를 잡아 ``cv2.pointPolygonTest``로
-        포함하는 첫 grid 폴리곤을 찾고, ``get_piece_color_improved``로 색상 판정 후
-        RGB crop을 ResNet에 통과시켜 기물 종류를 결정한다.
-        결과는 ``"{W|B}{P|R|N|B|Q|K}"`` 코드로 해당 칸에 기록.
-        YOLO 인자: ``conf=0.5, iou=0.3``.
+    Note:
+        Foot point를 사용하는 이유는 기물의 머리 좌표가 perspective에 따라 인접 square로
+        밀려서 grid 매핑 오차를 키우기 때문이다.
     """
-    # YOLO 추론: confidence 0.5 이상, IoU 0.3 이하(중복 박스 억제)
     results = yolo_model(frame, conf=0.5, iou=0.3, verbose=False)
     board_dict = {}
 
@@ -179,40 +163,33 @@ def analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, prepro
         for box in result.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-            # 체스 말의 발 지점(foot point): 바운딩 박스 하단 중앙.
-            # 말의 머리가 아닌 발로 어느 칸에 있는지 판별해야 격자 매핑 오차가 줄어든다.
             foot_point = ((x1 + x2) // 2, y2)
 
-            # 발 지점이 어느 체스판 격자 폴리곤 안에 있는지 순차 탐색.
-            # pointPolygonTest >= 0 : 경계 포함 내부. 격자를 찾지 못하면 skip.
             square = None
             if grid_polygons:
                 for sq, poly in grid_polygons.items():
+                    # pointPolygonTest >= 0 → 경계 포함 내부
                     if cv2.pointPolygonTest(poly, foot_point, False) >= 0:
                         square = sq
                         break
 
             if not square:
-                continue  # 보드 밖 검출 무시
+                continue
 
-            # HSV V채널 임계값으로 흰/검 구분
             color = get_piece_color_improved(frame, [x1, y1, x2, y2])
 
-            # ResNet 입력용 크롭 (바운딩 박스 전체, BGR → RGB)
             crop_bgr = frame[y1:y2, x1:x2]
             if crop_bgr.size == 0:
                 continue
 
             crop = Image.fromarray(cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB))
-            # preprocess: Resize(224,224) → ToTensor → ImageNet Normalize
             input_tensor = preprocess(crop).unsqueeze(0).to(device)
 
             with torch.no_grad():
                 outputs = resnet_model(input_tensor)
                 _, pred_idx = torch.max(outputs, 1)
-                abbr = CLASS_ABBR[CLASS_NAMES[pred_idx.item()]]  # 'P','R','N','B','Q','K'
+                abbr = CLASS_ABBR[CLASS_NAMES[pred_idx.item()]]
 
-            # 최종 코드: "W" + 기물약자 or "B" + 기물약자 (예: "WP", "BK")
             color_prefix = "W" if color == "White" else "B"
             final_code = f"{color_prefix}{abbr}"
             board_dict[square] = final_code
@@ -221,10 +198,16 @@ def analyze_frame(frame, yolo_model, resnet_model, grid_polygons, device, prepro
 
 
 def normalize_board_dict(d):
-    """보드 딕셔너리를 정규화한다 — 키/값을 문자열로, 알파벳 순 정렬.
+    """key/value를 str로 강제하고 key 오름차순으로 정렬한다.
 
-    정규화된 dict 끼리만 == 비교로 '변경 없음' 판단이 가능하다.
-    only_publish_on_change 로직과 ROS2 메시지 직렬화 모두 이 함수를 통과한 dict를 사용.
+    정규화된 dict끼리만 ``==`` 비교로 'no change'를 판정할 수 있다.
+    ``only_publish_on_change`` 분기와 메시지 직렬화가 본 함수의 출력을 소비한다.
+
+    Args:
+        d (dict): square → piece code. ``None``/빈 dict면 빈 dict를 반환한다.
+
+    Returns:
+        dict[str, str]: 정렬·문자열화된 dict.
     """
     if not d:
         return {}
@@ -232,18 +215,24 @@ def normalize_board_dict(d):
 
 
 class VisionNode(Node):
-    """카메라 + 추론 루프를 감싸는 ROS2 노드.
+    """카메라 + 추론 루프를 wrapping 하는 ROS2 node.
 
-    상대 토픽 ``vision/board_state`` (root namespace에서 ``/vision/board_state``로 풀림)에
-    QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)로 ``BoardState``를 publish한다.
-    sub-phase A 마이그레이션 기간엔 Firebase write 병행 → sub-phase E에서 제거됨.
+    Publishes:
+        vision/board_state (chess_ai_interfaces/msg/BoardState): 최신 보드 상태.
+            QoS RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1) — 늦게 join한 subscriber도
+            최신 값을 즉시 수신.
 
-    Parameter 동적 변경 주의:
-        ``run()``은 ``rclpy.spin()`` 없이 OpenCV 루프로 블로킹된다. Parameter는
-        ``__init__``에서 1회 읽어 인스턴스 속성에 캐시되며, 런타임 ``ros2 param set``은
-        parameter server엔 반영되나 노드 재시작 전엔 실제 동작에 적용되지 않는다.
-        ``add_on_set_parameters_callback``은 의도적으로 미연결 (sub-phase A 범위).
-        향후 Timer + ``spin()`` 모델로 전환되는 sub-phase에서 dynamic param 재활성.
+    Parameters:
+        analyze_interval_sec (double, default 0.20): YOLO+ResNet 추론 간 최소 간격(초).
+        publish_min_interval_sec (double, default 0.20): publish 간 최소 간격(초).
+        only_publish_on_change (bool, default True): 정규화된 보드가 동일하면 publish 생략.
+        frame_id (string, default ``"chess_board"``): 발행 메시지 ``Header.frame_id``.
+
+    Warning:
+        ``run()``은 OpenCV ``waitKey`` 기반 블로킹 루프이며 ``rclpy.spin()``을 호출하지
+        않는다. parameter는 ``__init__``에서 1회 읽어 인스턴스 속성에 cache되므로,
+        runtime ``ros2 param set``은 parameter server에만 반영되고 실제 동작에는 영향이
+        없다. dynamic parameter가 필요하면 Timer + spin 모델로 전환할 것.
     """
 
     def __init__(self):
@@ -283,8 +272,14 @@ class VisionNode(Node):
         self.preprocess = None
 
     def _publish_board_state(self, board_dict, capture_stamp):
-        # board_dict는 normalize_board_dict의 출력(이미 키 정렬됨)을 받지만,
-        # 임의 dict-like 입력도 받을 수 있도록 방어적으로 다시 정렬한다.
+        """``BoardState`` 메시지를 구성해 발행한다.
+
+        Args:
+            board_dict (dict): square → piece code. 호출 전 정규화돼 있어도, 안전을 위해
+                본 함수에서 다시 sort 한다.
+            capture_stamp (builtin_interfaces.msg.Time): 프레임 캡처 시점.
+                ``Header.stamp``로 사용된다 (측정 시점 기준).
+        """
         msg = BoardState()
         msg.header.stamp = capture_stamp
         msg.header.frame_id = self.frame_id
@@ -295,9 +290,17 @@ class VisionNode(Node):
         self.board_state_pub.publish(msg)
 
     def _load_models(self):
-        # Rule 7 (fail-loud): 필수 env 미설정 시 명시 RuntimeError. None 통과 시
-        # ultralytics가 'None' does not exist 트레이스 후 launch respawn 무한 루프
-        # (PB-5 회귀 방지).
+        """필수 env를 검증하고 YOLO·ResNet·grid·preprocess를 인스턴스에 적재한다.
+
+        Raises:
+            RuntimeError: ``YOLO_MODEL_PATH`` / ``RESNET_MODEL_PATH`` / ``CHESS_GRID_PATH``
+                env가 비어 있거나, 해당 경로 파일이 실제로 존재하지 않을 때.
+
+        Note:
+            env가 ``None``인 채로 ultralytics에 넘기면 silently ``"None" does not exist``
+            트레이스를 내며, launch supervisor가 respawn 루프에 빠질 수 있어 fail-loud로
+            차단한다.
+        """
         missing = [
             name for name, value in (
                 ("YOLO_MODEL_PATH", YOLO_PATH),
@@ -334,11 +337,23 @@ class VisionNode(Node):
         ])
 
     def run(self):
+        """카메라를 열고 OpenCV 디스플레이 루프를 돌면서 board_state를 발행한다.
+
+        ``cap.read()`` 직후 ``capture_stamp``를 캡처해 publish 메시지의 ``Header.stamp``로
+        쓴다 (발행 시점이 아니라 측정 시점). 추론 throttle과 publish throttle은 각각
+        독립된 ``analyze_interval_sec``, ``publish_min_interval_sec``으로 제어된다.
+        ``Q`` 키 또는 ``rclpy.ok() == False``로 종료한다.
+
+        Raises:
+            RuntimeError: ``cv2.VideoCapture(SOURCE)`` 가 열리지 않을 때.
+
+        Note:
+            ``cv2.imshow`` 헤더 문구는 사용자 표시 텍스트일 뿐이며 동작에 영향이 없다.
+        """
         self._load_models()
 
         self.cap = cv2.VideoCapture(SOURCE)
         if not self.cap.isOpened():
-            # Rule 7 (silent failure 방지): RuntimeError로 supervisor/launch가 관찰 가능하게.
             raise RuntimeError(f"Camera open failed (source={SOURCE})")
 
         self.get_logger().info(
@@ -351,7 +366,7 @@ class VisionNode(Node):
 
         while rclpy.ok():
             ret, frame = self.cap.read()
-            # Rule 7 (stamp = 측정 시점): cap.read() 직후 stamp 캡처.
+            # stamp = 측정 시점 — cap.read() 직후 캡처해야 시간 동기화가 의미 있음
             capture_stamp = self.get_clock().now().to_msg()
             if not ret:
                 break
@@ -368,8 +383,7 @@ class VisionNode(Node):
                 2,
             )
 
-            # 속도 제한 (rate-limiting): analyze_interval_sec 마다 1회 추론.
-            # 매 프레임마다 YOLO+ResNet을 돌리면 CPU/GPU 과부하 — 일정 간격으로 throttle.
+            # 매 프레임마다 YOLO+ResNet을 돌리면 CPU/GPU 과부하 — analyze_interval_sec으로 throttle
             if (now_ts - last_analyze_ts) >= self.analyze_interval_sec:
                 last_analyze_ts = now_ts
 
@@ -388,14 +402,12 @@ class VisionNode(Node):
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                     cv2.imwrite(os.path.join(SAVE_DIR, f"frame_{ts}.jpg"), frame)
 
-                # only_publish_on_change: 보드 상태가 이전과 동일하면 발행 생략.
-                # TRANSIENT_LOCAL latched이므로 가입자는 구독 시점에 최신 값을 받음.
+                # only_publish_on_change: 보드가 동일하면 publish 생략 (TRANSIENT_LOCAL이라
+                # 신규 subscriber는 어차피 마지막 값을 받는다)
                 should_send = True
                 if self.only_publish_on_change and last_sent_board is not None and board_norm == last_sent_board:
                     should_send = False
 
-                # 추가 publish 속도 제한 (publish_min_interval_sec).
-                # analyze_interval과 독립적으로 조절 가능.
                 if should_send and (now_ts - last_publish_ts) >= self.publish_min_interval_sec:
                     self._publish_board_state(board_norm, capture_stamp)
                     last_publish_ts = now_ts
@@ -410,12 +422,19 @@ class VisionNode(Node):
                 break
 
     def cleanup(self):
+        """카메라·OpenCV window를 해제한다."""
         if self.cap is not None:
             self.cap.release()
         cv2.destroyAllWindows()
 
 
 def main(args=None):
+    """Entry point: ``VisionNode`` 생성 → ``run`` → ``cleanup`` → ``shutdown``.
+
+    SIGINT는 ``KeyboardInterrupt``로 받아 정상 종료한다. ``rclpy.shutdown()``은
+    ``rclpy.ok()`` 가드 후 호출 — supervisor가 이미 shutdown한 context를 재호출하면
+    ``RCLError``가 발생한다.
+    """
     rclpy.init(args=args)
     node = None
     try:
