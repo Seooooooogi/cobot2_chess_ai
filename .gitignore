@@ -44,6 +44,9 @@ outputs/
 *.log
 *.jsonl
 
+# Documentation (local-only, not tracked)
+docs/
+
 # IDE
 .vscode/
 .idea/

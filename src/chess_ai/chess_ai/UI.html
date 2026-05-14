@@ -144,7 +144,7 @@
     const boardStateTopic = new ROSLIB.Topic({
       ros: ros,
       name: "/vision/board_state",
-      messageType: "cobot2_interfaces/msg/BoardState",
+      messageType: "chess_ai_interfaces/msg/BoardState",
       // QoS — vision_db publisher와 호환: RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)
       // (latched 메시지 수신해 페이지 로드 직후 보드 상태 표시)
       qos_profile_overrides: {
@@ -160,7 +160,7 @@
     const uiStatusTopic = new ROSLIB.Topic({
       ros: ros,
       name: "/main_controller/ui_status",
-      messageType: "cobot2_interfaces/msg/UIStatus",
+      messageType: "chess_ai_interfaces/msg/UIStatus",
       qos_profile_overrides: {
         reliability: 1,    // RELIABLE
         durability: 1,     // TRANSIENT_LOCAL
@@ -176,7 +176,7 @@
     const userDecisionService = new ROSLIB.Service({
       ros: ros,
       name: "/main_controller/user_decision",
-      serviceType: "cobot2_interfaces/srv/UserDecision",
+      serviceType: "chess_ai_interfaces/srv/UserDecision",
     });
 
     // UIStatus.job_id 최신값 — user_decision 호출 시 race protection으로 첨부.

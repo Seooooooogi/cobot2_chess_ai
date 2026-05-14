@@ -1,33 +1,18 @@
-"""AIMoveServiceNode — Stockfish 엔진 래퍼 서비스 노드 (entry point: ``ros2 run chess_ai stockfish``).
+"""Stockfish 엔진을 ROS2 service로 노출하는 노드 (entry point: ``ros2 run chess_ai stockfish``).
 
-역할:
-    체스 보드 dict (``A1``..``H8`` → 기물 코드 ``WP``/``BR``/...)를 입력받아
-    FEN 문자열로 변환 후 Stockfish 엔진의 best move를 반환하는 ROS2 service를 노출한다.
+보드 dict (``"A1"``..``"H8"`` → ``"WP"``/``"BR"`` piece code)를 입력받아 FEN 문자열로
+변환한 뒤 Stockfish의 best move를 반환한다. ``dict_memory``와 ``castling_rights``는
+JSON 파일로 영속화돼 노드 재기동 시 복원된다.
 
-ROS2 Interfaces:
-    Server: Service ``StockfishMove`` (chess_ai_interfaces/StockfishMove)
-    Server: Service ``reset_chess_state`` (std_srvs/Trigger)
-    ROS2 parameters (Phase 5 sub-phase D3, Web UI가 rosbridge set_parameters로 설정):
-        - ``depth`` (int, 1–30, default 15)            — Stockfish 탐색 깊이.
-        - ``skill_level`` (int, 0–20, default 10)      — Stockfish 기력(skill level).
-        - ``default_turn`` (string, "w" or "b", default "w") — AI가 두는 색상.
-        Range validation은 ``add_on_set_parameters_callback``에서 수행. 위반 시 set 실패.
-        엔진은 항상 이 parameter 값을 사용 — StockfishMove.srv는 보드 데이터만 전달.
+Environment:
+    STOCKFISH_PATH (str): Stockfish 바이너리 경로. 기본 ``/usr/games/stockfish``.
+    CHESS_AI_STATE_PATH (str): 상태 JSON 경로. 기본
+        ``~/.local/share/cobot2_chess_ai/chess_state.json``.
 
-내부 상태:
-    - ``self.stockfish``  — ``Stockfish(path=STOCKFISH_PATH)`` 인스턴스. 엔진 바이너리 부재 시 ``None``.
-    - ``self.dict_memory`` — 직전 보드 dict. 앙파상(en-passant) 추론용 ``last_move`` 계산에 사용.
-
-외부 의존성:
-    - Stockfish 바이너리 (``$STOCKFISH_PATH``, env var, default ``/usr/games/stockfish``)
-    - ``stockfish`` PyPI 라이브러리
-    - ``chess_ai_interfaces.srv.StockfishMove``
-
-Issues (Phase 1-1 doc Node 2):
-    - ~~IMPORTANT S1-1: ``STOCKFISH_PATH`` is a module constant — Phase 4: env-ize.~~ **RESOLVED 2026-05-04**: ``os.getenv("STOCKFISH_PATH", ...)``.
-    - ~~MINOR S1-2: Service QoS not explicitly declared (defaults used) → ROS2 Rule 4.~~ **RESOLVED 2026-05-04**: ``qos_profile=qos_profile_services_default`` 명시.
-    # S1-3 RESOLVED 2026-05-05: castling rights를 ``self.castling_rights``로 추적 (JSON 영속화); 킹/룩 이동 시 revoke.
-    # S1-4 RESOLVED 2026-05-05: ``dict_memory``를 ``CHESS_AI_STATE_PATH`` JSON에 영속화; 노드 기동 시 로드.
+Note:
+    Service 이름은 사설 namespace ``~/...`` — 노드 이름 ``chess_ai_node`` 하위로 풀린다
+    (예: ``/chess_ai_node/StockfishMove``). 절대 경로 또는 namespace-relative 형태로 쓰면
+    root namespace로 빠지므로 의도적으로 ``~/`` prefix를 강제한다.
 """
 
 import json
@@ -48,9 +33,8 @@ from chess_ai_interfaces.srv import StockfishMove
 
 # ================= [기본 설정: 클래스보다 먼저 정의] =================
 STOCKFISH_PATH = os.getenv("STOCKFISH_PATH", "/usr/games/stockfish")
-# 사설 네임스페이스(~/...) 사용 — 노드 코드 노드명 (chess_ai_node) 하위로 풀림.
-# Rule 5 (resource = node owns) 준수. 절대 경로(`/`로 시작) 또는 namespace-relative
-# (`StockfishMove`) 사용 금지 — 후자는 root namespace에 매핑됨 (PB-4 회귀 방지).
+# 사설 namespace (~/...) 강제 — root namespace로 빠지는 회귀를 차단 (절대 경로·
+# namespace-relative 형태 금지)
 SERVICE_NAME = "~/StockfishMove"
 RESET_SERVICE_NAME = "~/reset_chess_state"
 CHESS_AI_STATE_PATH = os.path.expanduser(
@@ -61,8 +45,7 @@ DEFAULT_SKILL_LEVEL = 10
 DEFAULT_DEPTH = 15
 DEFAULT_TURN = "w"
 
-# ROS2 parameter range validation (sub-phase D3).
-# Stockfish 라이브러리 원래 범위 그대로. sentinel 설계 폐기로 0도 자연 허용.
+# Stockfish 라이브러리 원래 범위 그대로 (sentinel 미사용)
 DEPTH_MIN, DEPTH_MAX = 1, 30
 SKILL_LEVEL_MIN, SKILL_LEVEL_MAX = 0, 20
 VALID_TURNS = ("w", "b")
@@ -70,13 +53,30 @@ VALID_TURNS = ("w", "b")
 
 
 class AIMoveServiceNode(Node):
-    """``StockfishMove``와 ``reset_chess_state`` service를 호스팅하는 ROS2 노드.
+    """Stockfish 엔진을 wrapping 하는 ROS2 서비스 노드.
 
-    생성자 Side Effects:
-        - ``Stockfish(path=STOCKFISH_PATH)`` 인스턴스화를 시도하며, 실패 시 ``None``으로
-          저장하고 error 로그를 남긴다. 각 요청은 매번 ``None`` 여부를 재확인한다.
-        - ``_load_state()``로 ``dict_memory``와 ``castling_rights``를 JSON
-          (``CHESS_AI_STATE_PATH``)에서 복원. 파일이 없으면 빈 dict / ``"KQkq"``로 시작.
+    Services:
+        ~/StockfishMove (chess_ai_interfaces/srv/StockfishMove): 보드 dict → best move +
+            적용 후 보드의 FEN.
+        ~/reset_chess_state (std_srvs/srv/Trigger): ``dict_memory`` + ``castling_rights``
+            초기화 및 영속 파일 삭제.
+
+    Parameters (rosbridge ``set_parameters``로 runtime 변경 가능):
+        depth (int, default 15): Stockfish 탐색 깊이. 유효 범위 ``[1, 30]``.
+        skill_level (int, default 10): Stockfish skill level. 유효 범위 ``[0, 20]``.
+        default_turn (string, default ``"w"``): AI가 두는 색상. ``"w"`` 또는 ``"b"``.
+
+    Internal state:
+        self.stockfish (stockfish.Stockfish | None): 엔진 핸들. 바이너리 부재·로드 실패 시
+            ``None``으로 유지된다 (노드 자체는 생존).
+        self.dict_memory (dict[str, str]): 직전에 응답한 보드 상태. en-passant 추론용
+            ``last_move`` 계산에 사용.
+        self.castling_rights (str): ``"KQkq"`` 표기 castling 권한. 킹/룩 이동으로 revoke.
+
+    Warning:
+        Stockfish 인스턴스화는 try/except로 감싼다. 호출 측은 ``response.success == False``로
+        엔진 부재 상황을 식별해야 한다 — service call은 RuntimeError 대신 빈 best_move를
+        반환한다.
     """
 
     def __init__(self):
@@ -90,8 +90,6 @@ class AIMoveServiceNode(Node):
 
         self._load_state()
 
-        # Phase 5 sub-phase D3: engine config를 ROS2 parameter로 노출 (Web UI →
-        # rosbridge set_parameters). Range validation은 _on_set_parameters_callback.
         self.declare_parameter("depth", DEFAULT_DEPTH)
         self.declare_parameter("skill_level", DEFAULT_SKILL_LEVEL)
         self.declare_parameter("default_turn", DEFAULT_TURN)
@@ -112,11 +110,16 @@ class AIMoveServiceNode(Node):
         self.get_logger().info(f"Stockfish service ready: {SERVICE_NAME}")
 
     def _on_set_parameters(self, params):
-        """ROS2 parameter set 검증 콜백.
+        """``set_parameters`` 요청을 type·range로 검증하는 callback.
 
-        UI(rosbridge)에서 set_parameters 호출 시 트리거. depth/skill_level 정수
-        범위, default_turn 'w'/'b' 검증. 위반 시 successful=False로 거부 + 노드
-        로그 — Rule 7 (silent failure 방지).
+        rosbridge/CLI에서 들어온 parameter 변경을 첫 위반에서 reject 하고 warn 로그를 남긴다.
+        조용한 실패를 방지하기 위해 거부 사유를 reason 필드에 채운다.
+
+        Args:
+            params (list[rclpy.parameter.Parameter]): 적용 시도 중인 parameter 목록.
+
+        Returns:
+            rcl_interfaces.msg.SetParametersResult: 첫 위반에서 reject, 모두 통과 시 ok.
         """
         for p in params:
             reason = None
@@ -135,22 +138,24 @@ class AIMoveServiceNode(Node):
         return SetParametersResult(successful=True)
 
     def dict_to_fen(self, pieces_dict, turn):
-        """보드 dict을 FEN 문자열로 변환한다.
+        """보드 dict을 FEN 문자열로 직렬화한다.
+
+        En-passant target square는 ``self.dict_memory`` 와의 single-removal /
+        single-addition diff로 last_move를 추론한 뒤, 폰의 2칸 전진 패턴에서만 채운다.
+        2개 이상 칸이 변하면 last_move 추론을 포기해 en-passant는 ``-``로 둔다.
+        Castling rights는 ``self.castling_rights``를 그대로 사용 — revoke는 caller 책임.
 
         Args:
-            pieces_dict: dict[str, str] — key는 ``"A1"``..``"H8"``, value는 ``"WP"``/``"BR"`` 등.
-            turn:        ``"w"`` 또는 ``"b"``.
+            pieces_dict (dict[str, str]): square → piece code (``"WP"``/``"BR"``/...).
+            turn (str): ``"w"`` 또는 ``"b"`` — FEN 차례 필드.
 
         Returns:
-            str — ``"<placement> <turn> <castling> <ep> 0 1"`` 형식의 FEN.
+            str: ``"<placement> <turn> <castling> <ep> 0 1"`` 형식 FEN.
 
-        Side Effects:
-            없음 (``self.dict_memory`` read-only로만 참조).
-
-        Notes:
-            Castling rights: ``self.castling_rights`` 사용 (JSON 영속화, 킹/룩 이동 시 revoke).
-            En-passant: ``self.dict_memory`` 기반으로 ``last_move``를 추론
-            (single-removal/single-addition diff) — 여러 칸 변경 시 ``last_move = None``.
+        Note:
+            halfmove clock과 fullmove number는 단순화를 위해 ``0 1`` 고정. 50수 룰/
+            반복국면 판정이 필요하면 추후 별도 추적이 필요하다.
+            ``self.dict_memory``는 read-only 참조 — side effect 없음.
         """
         last_move = None
         board = [["" for _ in range(8)] for _ in range(8)]
@@ -170,7 +175,6 @@ class AIMoveServiceNode(Node):
             "BP": "p",
         }
 
-        # 이전 상태 기반 last_move 추론 (있으면)
         if self.dict_memory:
             removed = []
             added = []
@@ -188,14 +192,13 @@ class AIMoveServiceNode(Node):
             if len(removed) == 1 and len(added) == 1:
                 last_move = removed[0] + added[0]
 
-        # board[row][col]: row=0이 8랭크(흑 뒤쪽), row=7이 1랭크(백 뒤쪽)
-        # "A1" → col=0, row=7 / "H8" → col=7, row=0
+        # FEN 랭크 인덱스: row=0이 8랭크(흑 뒤쪽), row=7이 1랭크(백 뒤쪽)
         for position, piece in pieces_dict.items():
-            col = ord(position[0].upper()) - ord("A")  # 'A'=0 ~ 'H'=7
-            row = 8 - int(position[1])                  # '1'→7, '8'→0
+            col = ord(position[0].upper()) - ord("A")
+            row = 8 - int(position[1])
             board[row][col] = piece_match.get(piece, "")
 
-        # FEN 랭크 직렬화: 빈 칸은 연속 빈 칸 수를 숫자로 압축 (예: "rnbqkbnr/pppppppp/8/...")
+        # 빈 칸 압축: 연속 빈 칸 수를 숫자로 (FEN 사양)
         fen_rows = []
         for row in board:
             empty_count = 0
@@ -205,47 +208,43 @@ class AIMoveServiceNode(Node):
                     empty_count += 1
                 else:
                     if empty_count > 0:
-                        row_str += str(empty_count)  # 이전 빈 칸 수 flush
+                        row_str += str(empty_count)
                         empty_count = 0
                     row_str += cell
             if empty_count > 0:
-                row_str += str(empty_count)  # 행 끝 빈 칸 flush
+                row_str += str(empty_count)
             fen_rows.append(row_str)
 
-        # 캐슬링 권한 — _load_state/_save_state 로 영속화; "KQkq" → "KQ" → "-" 형태로 축소
         rights = self.castling_rights or "-"
 
-        # 앙파상 타겟 칸 추론: 폰이 2칸 전진했으면 그 사이 칸을 ep_square로 지정
-        # (Stockfish이 앙파상 가능 여부 판단에 사용)
+        # 폰이 2칸 전진했을 때만 ep_square 채움 — Stockfish이 en-passant 합법성 판단에 사용
         ep_square = "-"
         if last_move is not None and pieces_dict.get(last_move[2:4].upper()) in ["WP", "BP"]:
-            if last_move[1] == "2" and last_move[3] == "4":  # 백 폰 2칸 전진
+            if last_move[1] == "2" and last_move[3] == "4":
                 ep_square = last_move[0] + "3"
-            elif last_move[1] == "7" and last_move[3] == "5":  # 흑 폰 2칸 전진
+            elif last_move[1] == "7" and last_move[3] == "5":
                 ep_square = last_move[0] + "6"
 
-        # FEN 최종 조합: "<랭크> <차례> <캐슬링> <앙파상> <반수> <수 번호>"
-        # 반수(halfmove clock)와 수 번호는 단순화를 위해 "0 1" 고정.
         fen = f"{'/'.join(fen_rows)} {turn} {rights} {ep_square} 0 1"
         return fen
 
     def get_updated_dict(self, pieces_dict, move):
-        """체스 수를 보드 dict에 적용한다 (``self.dict_memory`` 갱신에 사용).
+        """UCI 수를 보드 dict에 적용해 새 dict을 반환한다 (입력은 mutate 하지 않음).
+
+        En-passant: 폰이 대각선 빈 칸으로 이동하면 ``to_pos[0] + from_pos[1]``의 폰을 제거.
+        Castling: 킹이 2칸 옆으로 이동하면 룩을 ``A``/``H`` ↔ ``D``/``F``로 재배치.
 
         Args:
-            pieces_dict: dict[str, str] — 현재 보드.
-            move:        UCI 형식 수 문자열, 예: ``"e2e4"`` 또는 ``"e7e8q"``
-                         (프로모션 suffix는 무시 — ``move[0:4]``만 소비).
+            pieces_dict (dict[str, str]): 적용 전 보드.
+            move (str): UCI 수 (예: ``"e2e4"`` 또는 ``"e7e8q"``). 프로모션 suffix는 무시되며
+                ``move[0:4]``만 소비된다.
 
         Returns:
-            dict[str, str] — 적용된 보드 (입력 dict은 복사되어 mutate되지 않음).
+            dict[str, str]: 수 적용 후 보드 (얕은 copy).
 
-        Side Effects:
-            없음.
-
-        Notes:
-            분기 처리: 폰의 대각선 빈 칸 이동 → 앙파상 캡처 (잡힌 폰 ``to_pos[0] + from_pos[1]``에서 제거);
-            킹의 2칸 이동 → 캐슬링 (룩을 ``A``/``H`` → ``D``/``F``로 재배치).
+        Note:
+            프로모션 시 piece type 교체 로직은 없다 — 폰이 ``e8``에 그대로 남는다.
+            FEN 직렬화 단계에서는 영향이 없지만 후속 이동 추적에 영향을 줄 수 있다.
         """
         from_pos = move[0:2].upper()
         to_pos = move[2:4].upper()
@@ -255,13 +254,11 @@ class AIMoveServiceNode(Node):
         if piece:
             updated_dict[to_pos] = piece
 
-        # 앙파상(간단)
         if piece and piece[1] == "P":
             if from_pos[0] != to_pos[0] and to_pos not in pieces_dict:
                 en_passant_pos = to_pos[0] + from_pos[1]
                 updated_dict.pop(en_passant_pos, None)
 
-        # 캐슬링(간단)
         if piece and piece[1] == "K":
             if abs(ord(from_pos[0]) - ord(to_pos[0])) == 2:
                 if to_pos[0] == "G":
@@ -277,7 +274,27 @@ class AIMoveServiceNode(Node):
         return updated_dict
 
     def get_best_move_callback(self, request, response):
-        saved_rights = self.castling_rights  # 예외 발생 시 롤백용 스냅샷
+        """``~/StockfishMove`` service handler.
+
+        Pipeline: ``dict_memory``가 비어 있으면 현재 보드로부터 castling rights를 추론 →
+        prev/new diff로 revoke 적용 → Stockfish에 FEN set → ``get_best_move`` 호출 →
+        적용 후 보드를 ``response.fen``으로 직렬화 → 영속 상태 갱신.
+
+        Args:
+            request (StockfishMove.Request): ``pieces_data`` 필드에 JSON-serialized 보드 dict.
+            response (StockfishMove.Response): ``best_move`` (UCI), ``success``, ``fen``을
+                채워 반환한다.
+
+        Returns:
+            StockfishMove.Response: 성공·실패 모든 경로에서 동일 객체 반환.
+
+        Note:
+            엔진 호출 중 발생하는 모든 예외는 ``response.success=False``로 squash 되며,
+            ``self.castling_rights``·``self.dict_memory``는 호출 직전 스냅샷으로 롤백된다.
+            영속 ``_save_state()``는 best_move 획득 + dict 갱신이 모두 성공한 경로에서만
+            호출된다.
+        """
+        saved_rights = self.castling_rights
         saved_memory = self.dict_memory
         try:
             if self.stockfish is None:
@@ -285,26 +302,24 @@ class AIMoveServiceNode(Node):
 
             pieces_dict = json.loads(request.pieces_data) if request.pieces_data else {}
 
-            # Phase 5 sub-phase D3: 엔진 설정값 단일 경로 — ROS2 parameter만 사용.
-            # StockfishMove.srv는 보드 데이터만 전달. depth/skill_level/turn 필드 폐기.
+            # 엔진 설정값 단일 경로 — ROS2 parameter만 사용 (StockfishMove.srv는 보드만 전달)
             skill_level = int(self.get_parameter("skill_level").value)
             depth = int(self.get_parameter("depth").value)
             turn = str(self.get_parameter("default_turn").value)
 
-            # 첫 호출(dict_memory 비어있을 때): 보존된 "KQkq"를 현재 보드로 클램프.
-            # 룩/킹이 이미 없거나 움직인 상태라면 해당 캐슬링 권한을 제거해 유효한 FEN 보장.
-            # (체스판 재배치 후 상태 복원 시나리오 대응 — PB-4 이후 설계)
+            # 콜드 스타트(dict_memory 빈 상태)에는 보존된 "KQkq"가 실제 보드와 불일치할 수
+            # 있으므로 현재 보드로부터 자연스러운 castling rights를 재추론한다
             if not self.dict_memory:
                 inferred = ""
                 if pieces_dict.get("E1") == "WK":
-                    if pieces_dict.get("H1") == "WR": inferred += "K"  # 백 킹사이드
-                    if pieces_dict.get("A1") == "WR": inferred += "Q"  # 백 퀸사이드
+                    if pieces_dict.get("H1") == "WR": inferred += "K"
+                    if pieces_dict.get("A1") == "WR": inferred += "Q"
                 if pieces_dict.get("E8") == "BK":
-                    if pieces_dict.get("H8") == "BR": inferred += "k"  # 흑 킹사이드
-                    if pieces_dict.get("A8") == "BR": inferred += "q"  # 흑 퀸사이드
+                    if pieces_dict.get("H8") == "BR": inferred += "k"
+                    if pieces_dict.get("A8") == "BR": inferred += "q"
                 self.castling_rights = inferred
 
-            # 사용자 수 적용에 따른 castling rights revoke (직전 보드 → 현재 보드)
+            # 사용자 수 적용분의 revoke (직전 보드 → 새 보드)
             self._revoke_castling_rights(self.dict_memory, pieces_dict)
 
             self.stockfish.set_skill_level(skill_level)
@@ -321,16 +336,15 @@ class AIMoveServiceNode(Node):
 
             response.best_move = best_move if best_move else ""
             response.success = True if best_move else False
-            response.fen = ""  # 기본값. AI 수 성공 시 아래에서 post-move FEN으로 채움.
+            response.fen = ""  # 실패 경로 기본값; 성공 시 아래에서 post-move FEN으로 갱신
 
             if best_move:
                 updated_dict = self.get_updated_dict(pieces_dict, best_move)
-                # AI 수 적용에 따른 castling rights revoke (현재 보드 → AI 수 적용 후 보드)
+                # AI 수 적용분의 revoke (사용자 수 적용 보드 → AI 수 적용 보드)
                 self._revoke_castling_rights(pieces_dict, updated_dict)
                 self.dict_memory = updated_dict
-                self._save_state()  # 완전 성공 시에만 영속화
-                # AI 수 직후의 보드를 다음 차례 색상으로 FEN 직렬화 — game_logger
-                # audit (sub-phase E)에 활용. 차례 flip: 'w' ↔ 'b'.
+                self._save_state()
+                # 다음 차례(상대 색)로 FEN 직렬화 — game_logger audit 입력으로 사용
                 next_turn = "b" if turn == "w" else "w"
                 response.fen = self.dict_to_fen(updated_dict, next_turn)
 
@@ -339,13 +353,18 @@ class AIMoveServiceNode(Node):
             response.success = False
             response.best_move = ""
             response.fen = ""
-            self.castling_rights = saved_rights  # 호출 이전 상태로 롤백
+            self.castling_rights = saved_rights
             self.dict_memory = saved_memory
 
         return response
 
 
     def _load_state(self) -> None:
+        """영속 JSON에서 ``dict_memory``와 ``castling_rights``를 복원한다.
+
+        파일 부재 시 빈 dict / ``"KQkq"``로 fresh-start 한다. JSON 파싱 실패도 동일하게
+        fresh-start 하되 warn 로그를 남긴다 (silent corruption 방지).
+        """
         self._state_path = CHESS_AI_STATE_PATH
         try:
             with open(self._state_path, "r", encoding="utf-8") as f:
@@ -363,6 +382,15 @@ class AIMoveServiceNode(Node):
             self.get_logger().warn(f"Chess state load failed ({e}); starting fresh.")
 
     def _save_state(self) -> None:
+        """현재 ``dict_memory``와 ``castling_rights``를 JSON에 덮어쓴다.
+
+        상위 디렉토리는 ``os.makedirs(exist_ok=True)``로 보장한다. write 실패는 warn 로그로만
+        남기고 노드 동작은 유지한다.
+
+        Warning:
+            non-atomic write — ``open(..., "w")``를 직접 사용한다. SIGKILL/디스크 full
+            상황에서 파일이 잘려 다음 기동 시 fresh-start 분기로 빠질 수 있다.
+        """
         try:
             os.makedirs(os.path.dirname(self._state_path), exist_ok=True)
             data = {
@@ -375,6 +403,15 @@ class AIMoveServiceNode(Node):
             self.get_logger().warn(f"Chess state save failed: {e}")
 
     def _revoke_castling_rights(self, prev_dict: dict, new_dict: dict) -> None:
+        """두 보드 사이의 변동에 따라 ``self.castling_rights``를 in-place 갱신한다.
+
+        킹이 ``E1``/``E8``에서 사라지면 해당 색의 양쪽 castling을 모두 제거.
+        룩이 ``A1``/``H1``/``A8``/``H8``에서 사라지면 해당 방향만 제거.
+
+        Args:
+            prev_dict (dict[str, str]): 변동 전 보드.
+            new_dict (dict[str, str]): 변동 후 보드.
+        """
         rights = self.castling_rights or ""
         if prev_dict.get("E1") == "WK" and new_dict.get("E1") != "WK":
             rights = rights.replace("K", "").replace("Q", "")
@@ -391,6 +428,15 @@ class AIMoveServiceNode(Node):
         self.castling_rights = rights
 
     def reset_chess_state_callback(self, request, response):
+        """``~/reset_chess_state`` (Trigger) handler — 신규 게임용 상태 초기화.
+
+        ``dict_memory``를 비우고 ``castling_rights``를 ``"KQkq"``로 되돌린 뒤, 영속 JSON
+        파일을 삭제한다 (파일 없으면 무시). 작업 자체가 실패하면 ``success=False``와 함께
+        예외 메시지를 반환한다.
+
+        Returns:
+            std_srvs.srv.Trigger.Response: 성공 시 ``success=True, message="reset ok"``.
+        """
         try:
             self.dict_memory = {}
             self.castling_rights = "KQkq"
@@ -409,6 +455,12 @@ class AIMoveServiceNode(Node):
 
 
 def main(args=None):
+    """Entry point: ``AIMoveServiceNode`` 생성 후 ``rclpy.spin``.
+
+    SIGINT는 ``KeyboardInterrupt``로 받아 정상 종료한다. ``rclpy.shutdown()``은
+    ``rclpy.ok()`` 가드 후 호출 — supervisor가 이미 shutdown한 context를 재호출하면
+    ``RCLError``가 발생한다.
+    """
     rclpy.init(args=args)
     node = AIMoveServiceNode()
     try:
